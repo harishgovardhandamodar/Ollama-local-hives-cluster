@@ -20,33 +20,33 @@ const (
 )
 
 type Job struct {
-	ID            string     `json:"job_id"`
-	ClientID      string     `json:"client_id"`
-	JobType       string     `json:"job_type"`
-	Payload       []byte     `json:"-"`
+	ID            string                 `json:"job_id"`
+	ClientID      string                 `json:"client_id"`
+	JobType       string                 `json:"job_type"`
+	Payload       []byte                 `json:"-"`
 	PayloadMap    map[string]interface{} `json:"payload"`
-	Status        JobStatus  `json:"status"`
-	Result        interface{} `json:"result,omitempty"`
-	Error         string     `json:"error,omitempty"`
-	CreatedAt     float64    `json:"created_at"`
-	StartedAt     *float64   `json:"started_at,omitempty"`
-	CompletedAt   *float64   `json:"completed_at,omitempty"`
-	QueuePosition int        `json:"queue_position"`
-	Model         string     `json:"model,omitempty"`
-	PromptTokens  int        `json:"prompt_tokens,omitempty"`
-	EvalTokens    int        `json:"completion_tokens,omitempty"`
-	TotalTokens   int        `json:"total_tokens,omitempty"`
-	EvalDuration  float64    `json:"-"`
+	Status        JobStatus              `json:"status"`
+	Result        interface{}            `json:"result,omitempty"`
+	Error         string                 `json:"error,omitempty"`
+	CreatedAt     float64                `json:"created_at"`
+	StartedAt     *float64               `json:"started_at,omitempty"`
+	CompletedAt   *float64               `json:"completed_at,omitempty"`
+	QueuePosition int                    `json:"queue_position"`
+	Model         string                 `json:"model,omitempty"`
+	PromptTokens  int                    `json:"prompt_tokens,omitempty"`
+	EvalTokens    int                    `json:"completion_tokens,omitempty"`
+	TotalTokens   int                    `json:"total_tokens,omitempty"`
+	EvalDuration  float64                `json:"-"`
 }
 
 func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
 	return &Job{
-		ID:        id,
-		ClientID:  clientID,
-		JobType:   jobType,
+		ID:         id,
+		ClientID:   clientID,
+		JobType:    jobType,
 		PayloadMap: payload,
-		Status:    JobPending,
-		CreatedAt: now(),
+		Status:     JobPending,
+		CreatedAt:  now(),
 	}
 }
 
@@ -55,104 +55,95 @@ func now() float64 {
 }
 
 type OllamaQueue struct {
-	mu            sync.Mutex
-	cond          *sync.Cond
-	queue         []*Job
+	jobCh         chan *Job
+	stopCh        chan struct{}
+	wg            sync.WaitGroup
+
+	mu            sync.RWMutex
 	running       map[string]*Job
 	completed     map[string]*Job
 	maxConcurrent int
 	ollamaURL     string
 	ollamaModel   string
-	stopCh        chan struct{}
+
+	httpClient    *http.Client
+	httpClientMu  sync.Mutex
 }
 
 func NewOllamaQueue(maxConcurrent int, ollamaURL, ollamaModel string) *OllamaQueue {
-	q := &OllamaQueue{
-		queue:         make([]*Job, 0),
+	return &OllamaQueue{
+		jobCh:         make(chan *Job, 1000),
+		stopCh:        make(chan struct{}),
 		running:       make(map[string]*Job),
 		completed:     make(map[string]*Job),
 		maxConcurrent: maxConcurrent,
 		ollamaURL:     ollamaURL,
 		ollamaModel:   ollamaModel,
-		stopCh:        make(chan struct{}),
+		httpClient: &http.Client{
+			Timeout: 600 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        maxConcurrent + 5,
+				MaxIdleConnsPerHost: maxConcurrent + 5,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
-	q.cond = sync.NewCond(&q.mu)
-	return q
 }
 
 func (q *OllamaQueue) Start() {
-	go q.dispatchLoop()
+	for i := 0; i < q.maxConcurrent; i++ {
+		q.wg.Add(1)
+		go q.worker(i)
+	}
 }
 
 func (q *OllamaQueue) Stop() {
 	close(q.stopCh)
-	q.cond.Broadcast()
+	q.wg.Wait()
 }
 
-func (q *OllamaQueue) Submit(job *Job) {
-	q.mu.Lock()
-	job.QueuePosition = len(q.queue) + 1
-	q.queue = append(q.queue, job)
-	q.mu.Unlock()
-	q.cond.Signal()
+func (q *OllamaQueue) Submit(job *Job) bool {
+	select {
+	case q.jobCh <- job:
+		return true
+	default:
+		return false
+	}
 }
 
-func (q *OllamaQueue) dispatchLoop() {
+func (q *OllamaQueue) worker(id int) {
+	defer q.wg.Done()
 	for {
-		q.mu.Lock()
-		for len(q.queue) == 0 {
-			q.cond.Wait()
-			select {
-			case <-q.stopCh:
-				q.mu.Unlock()
-				return
-			default:
-			}
-		}
-
-		runningCount := len(q.running)
-		for runningCount < q.maxConcurrent && len(q.queue) > 0 {
-			job := q.queue[0]
-			q.queue = q.queue[1:]
-			job.Status = JobRunning
-			now := now()
-			job.StartedAt = &now
-			job.QueuePosition = 0
-			q.running[job.ID] = job
-
-			for i, j := range q.queue {
-				j.QueuePosition = i + 1
-			}
-
-			runningCount++
-			go q.executeJob(job)
-		}
-		q.mu.Unlock()
-
 		select {
 		case <-q.stopCh:
 			return
-		default:
-			time.Sleep(100 * time.Millisecond)
+		case job := <-q.jobCh:
+			job.Status = JobRunning
+			now := now()
+			job.StartedAt = &now
+
+			q.mu.Lock()
+			q.running[job.ID] = job
+			q.mu.Unlock()
+
+			q.executeJob(job)
+
+			q.mu.Lock()
+			delete(q.running, job.ID)
+			q.completed[job.ID] = job
+			q.mu.Unlock()
 		}
 	}
 }
 
-func (q *OllamaQueue) executeJob(job *Job) {
-	defer func() {
-		if r := recover(); r != nil {
-			job.Status = JobFailed
-			job.Error = fmt.Sprintf("panic: %v", r)
-			now := now()
-			job.CompletedAt = &now
-		}
-		q.mu.Lock()
-		delete(q.running, job.ID)
-		q.completed[job.ID] = job
-		q.mu.Unlock()
-		q.cond.Signal()
-	}()
+var resultPool = sync.Pool{
+	New: func() interface{} {
+		m := make(map[string]interface{}, 16)
+		return m
+	},
+}
 
+func (q *OllamaQueue) executeJob(job *Job) {
 	var result interface{}
 	var err error
 
@@ -185,12 +176,32 @@ func (q *OllamaQueue) executeJob(job *Job) {
 		job.Result = result
 		parseTokenMetrics(job, result)
 		if rec := recordFromResult(job, result); rec != nil && defaultDB != nil {
-			if err := defaultDB.Insert(*rec); err != nil {
-				logError("Failed to record token usage: %v", err)
-			}
+			insertDB(defaultDB, rec)
 		}
-		logInfo("Job %s completed: type=%s", job.ID, job.JobType)
+		logInfo("Job %s completed: type=%s tokens=%d tps=%.1f", job.ID, job.JobType, job.TotalTokens, calcTPS(job))
 	}
+}
+
+func calcTPS(job *Job) float64 {
+	if job.StartedAt != nil && job.CompletedAt != nil {
+		dur := *job.CompletedAt - *job.StartedAt
+		if dur > 0 && job.TotalTokens > 0 {
+			return float64(job.TotalTokens) / dur
+		}
+	}
+	if job.EvalDuration > 0 && job.EvalTokens > 0 {
+		return float64(job.EvalTokens) / (job.EvalDuration / 1e9)
+	}
+	return 0
+}
+
+func insertDB(db *DBStore, rec *TokenRecord) {
+	go func() {
+		if err := db.Insert(*rec); err != nil {
+			logError("Failed to record token usage: %v", err)
+		}
+	}()
+
 }
 
 func (q *OllamaQueue) callOllamaGenerate(payload map[string]interface{}) (interface{}, error) {
@@ -362,7 +373,7 @@ func (q *OllamaQueue) postOllama(path string, body map[string]interface{}) (inte
 		return nil, fmt.Errorf("marshal failed: %w", err)
 	}
 	url := q.ollamaURL + path
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
+	resp, err := q.getHTTPClient().Post(url, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("ollama request failed: %w", err)
 	}
@@ -379,9 +390,15 @@ func (q *OllamaQueue) postOllama(path string, body map[string]interface{}) (inte
 	return result, nil
 }
 
+func (q *OllamaQueue) getHTTPClient() *http.Client {
+	q.httpClientMu.Lock()
+	defer q.httpClientMu.Unlock()
+	return q.httpClient
+}
+
 func (q *OllamaQueue) getOllama(path string) (interface{}, error) {
 	url := q.ollamaURL + path
-	resp, err := http.Get(url)
+	resp, err := q.getHTTPClient().Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("ollama request failed: %w", err)
 	}
@@ -397,58 +414,46 @@ func (q *OllamaQueue) getOllama(path string) (interface{}, error) {
 }
 
 func (q *OllamaQueue) GetQueueStatus() map[string]interface{} {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	recentCompleted := 0
 	for _, j := range q.completed {
 		if j.CompletedAt != nil && now()-(*j.CompletedAt) < 3600 {
 			recentCompleted++
 		}
 	}
-	pendingJobs := make([]map[string]interface{}, 0)
-	for _, j := range q.queue {
-		pendingJobs = append(pendingJobs, jobToMap(j))
-	}
 	return map[string]interface{}{
-		"pending":         len(q.queue),
-		"running":         len(q.running),
+		"pending":          len(q.jobCh),
+		"running":          len(q.running),
 		"completed_recent": recentCompleted,
-		"max_concurrent":  q.maxConcurrent,
-		"ollama_url":      q.ollamaURL,
-		"ollama_model":    q.ollamaModel,
+		"max_concurrent":   q.maxConcurrent,
+		"ollama_url":       q.ollamaURL,
+		"ollama_model":     q.ollamaModel,
 	}
 }
 
 func (q *OllamaQueue) GetAvailableCapacity() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return max(0, q.maxConcurrent-len(q.running)-len(q.queue))
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return max(0, q.maxConcurrent-len(q.running))
 }
 
 func (q *OllamaQueue) GetJob(jobID string) *Job {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	if j, ok := q.running[jobID]; ok {
 		return j
 	}
 	if j, ok := q.completed[jobID]; ok {
 		return j
 	}
-	for _, j := range q.queue {
-		if j.ID == jobID {
-			return j
-		}
-	}
 	return nil
 }
 
 func (q *OllamaQueue) GetAllJobs() []map[string]interface{} {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	jobs := make([]map[string]interface{}, 0)
-	for _, j := range q.queue {
-		jobs = append(jobs, jobToMap(j))
-	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	jobs := make([]map[string]interface{}, 0, len(q.running)+len(q.completed))
 	for _, j := range q.running {
 		jobs = append(jobs, jobToMap(j))
 	}
@@ -472,7 +477,7 @@ func jobToMap(j *Job) map[string]interface{} {
 		"created_at":     j.CreatedAt,
 		"started_at":     j.StartedAt,
 		"completed_at":   j.CompletedAt,
-		"queue_position": j.QueuePosition,
+		"queue_position": 0,
 	}
 
 	if j.Model != "" {
@@ -491,21 +496,27 @@ func jobToMap(j *Job) map[string]interface{} {
 		m["total_tokens"] = pt + ct
 	}
 
+	tps := calcTPS(j)
+	if tps > 0 {
+		m["tokens_per_second"] = tps
+	}
+
 	if j.StartedAt != nil && j.CompletedAt != nil {
-		dur := *j.CompletedAt - *j.StartedAt
-		m["duration_seconds"] = dur
-		total := pt + ct
-		if dur > 0 && total > 0 {
-			m["tokens_per_second"] = float64(total) / dur
-		} else if dur > 0 && j.EvalDuration > 0 {
-			tps := float64(ct) / (j.EvalDuration / 1e9)
-			if tps > 0 {
-				m["tokens_per_second"] = tps
-			}
-		}
+		m["duration_seconds"] = *j.CompletedAt - *j.StartedAt
 	}
 
 	return m
+}
+
+func (q *OllamaQueue) CleanupOldJobs(maxAgeHours int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	cutoff := now() - float64(maxAgeHours*3600)
+	for id, j := range q.completed {
+		if j.CompletedAt != nil && *j.CompletedAt < cutoff {
+			delete(q.completed, id)
+		}
+	}
 }
 
 func parseTokenMetrics(job *Job, result interface{}) {
@@ -536,17 +547,6 @@ func parseTokenMetrics(job *Job, result interface{}) {
 				job.EvalTokens = int(ct)
 			}
 			job.TotalTokens = job.PromptTokens + job.EvalTokens
-		}
-	}
-}
-
-func (q *OllamaQueue) CleanupOldJobs(maxAgeHours int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	cutoff := now() - float64(maxAgeHours*3600)
-	for id, j := range q.completed {
-		if j.CompletedAt != nil && *j.CompletedAt < cutoff {
-			delete(q.completed, id)
 		}
 	}
 }

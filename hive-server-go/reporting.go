@@ -43,6 +43,12 @@ func initDB() {
 	logInfo("Token usage DB: %s (serving_type=%s)", path, servingType)
 }
 
+func closeDB() {
+	if defaultDB != nil {
+		defaultDB.Close()
+	}
+}
+
 func recordFromResult(job *Job, result interface{}) *TokenRecord {
 	m, ok := result.(map[string]interface{})
 	if !ok {
