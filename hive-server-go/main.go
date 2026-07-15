@@ -13,14 +13,16 @@ func main() {
 	maxConcurrent := getEnvInt("MAX_CONCURRENT", 2)
 	meshEnabled := os.Getenv("MESH_ENABLED") != "false"
 	maxClients := getEnvInt("MAX_CLIENTS", 5)
+	customProviders := splitAndTrim(os.Getenv("CUSTOM_PROVIDER_URLS"), ",")
 
 	cfg := ServerConfig{
-		OllamaURL:     ollamaURL,
-		OllamaModel:   ollamaModel,
-		ServerPort:    serverPort,
-		MaxConcurrent: maxConcurrent,
-		MeshEnabled:   meshEnabled,
-		MaxClients:    maxClients,
+		OllamaURL:          ollamaURL,
+		OllamaModel:        ollamaModel,
+		ServerPort:         serverPort,
+		MaxConcurrent:      maxConcurrent,
+		MeshEnabled:        meshEnabled,
+		MaxClients:         maxClients,
+		CustomProviderURLs: customProviders,
 	}
 
 	server := NewHiveServer(cfg)

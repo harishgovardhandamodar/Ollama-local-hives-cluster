@@ -75,6 +75,26 @@ tr:hover td{background:#1c2129}
 .mesh-topo svg{width:100%;height:100%}
 .peer-load-bar{height:4px;background:#21262d;border-radius:2px;overflow:hidden;margin-top:4px;width:80px;display:inline-block;vertical-align:middle}
 .peer-load-fill{height:100%;border-radius:2px;transition:width .3s}
+.provider-badge{font-size:9px;padding:2px 7px;border-radius:8px;font-weight:600;display:inline-block;margin:1px}
+.provider-badge.ollama{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}
+.provider-badge.lm_studio{background:rgba(240,136,62,.15);color:#f0883e;border:1px solid rgba(240,136,62,.3)}
+.provider-badge.vllm{background:rgba(137,87,229,.15);color:#bc8cff;border:1px solid rgba(137,87,229,.3)}
+.provider-badge.openai_compatible{background:rgba(46,160,67,.15);color:#2ea043;border:1px solid rgba(46,160,67,.3)}
+.provider-badge.custom{background:rgba(139,148,158,.15);color:#8b949e;border:1px solid rgba(139,148,158,.3)}
+.model-grid{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
+.model-tag{font-size:9px;padding:2px 8px;border-radius:10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;cursor:default}
+.model-tag:hover{border-color:#58a6ff}
+.node-card{background:#0f1117;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:8px}
+.node-card.self{border-color:#1f6feb}
+.node-card-header{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.node-card-header .name{font-size:13px;font-weight:600;color:#e1e4e8}
+.node-card-header .ep{font-size:10px;color:#6e7681;font-family:monospace}
+.node-card-header .self-tag{font-size:8px;padding:1px 6px;border-radius:4px;background:#1f6feb;color:#fff;font-weight:600}
+.provider-section{margin-top:8px;padding-top:6px;border-top:1px solid #21262d}
+.provider-header{display:flex;align-items:center;gap:6px;margin-bottom:4px}
+.provider-url{font-size:9px;color:#6e7681;font-family:monospace}
+.model-count{font-size:10px;color:#8b949e}
+.resource-model-count{font-size:12px;color:#58a6ff;margin-left:8px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 </style>
 </head>
@@ -126,10 +146,14 @@ tr:hover td{background:#1c2129}
   <div class="card full">
     <div class="tabs">
       <button class="tab-btn active" data-tab="jobs">Recent Jobs</button>
+      <button class="tab-btn" data-tab="resources">Resources</button>
       <button class="tab-btn" data-tab="logs">Live Logs</button>
     </div>
     <div class="tab-content active" id="tab-jobs">
       <div id="jobsTable" style="max-height:300px;overflow-y:auto"></div>
+    </div>
+    <div class="tab-content" id="tab-resources">
+      <div id="resourcesContent" style="max-height:350px;overflow-y:auto"></div>
     </div>
     <div class="tab-content" id="tab-logs">
       <div class="log-header">
@@ -279,6 +303,64 @@ function renderOllamaHealth(h){
   }
 }
 
+async function loadResources(){
+  try{
+    var r=await Promise.all([
+      fetch('/api/nodes').then(function(r){return r.json()}),
+      fetch('/api/providers').then(function(r){return r.json()}),
+      fetch('/api/models').then(function(r){return r.json()}),
+    ]);
+    renderResources(r[0].nodes||[],r[1].providers||[],r[2].models||[]);
+  }catch(e){}
+}
+
+function renderResources(nodes,providerTypes,models){
+  var el=document.getElementById('resourcesContent');
+  if(!nodes.length&&!models.length){
+    el.innerHTML='<div class="empty">No nodes or models detected. Start Ollama, LM Studio, or vLLM on this machine or connect mesh peers.</div>';
+    return;
+  }
+  var html='';
+
+  var modelCount=models.length;
+  html+='<div style="margin-bottom:10px;font-size:11px;color:#8b949e">'+nodes.length+' node(s) · '+providerTypes.length+' provider type(s) · <span style="color:#58a6ff;font-weight:600">'+modelCount+' model(s)</span></div>';
+
+  nodes.forEach(function(n){
+    var selfCls=n.is_self?' self':'';
+    var selfTag=n.is_self?' <span class="self-tag">SELF</span>':'';
+    var statusDot=n.alive?'<span class="dot connected"></span>':'<span class="dot disconnected"></span>';
+    var providerCount=n.providers?n.providers.length:0;
+    var totalModels=0;
+    if(n.providers)n.providers.forEach(function(p){totalModels+=p.models?p.models.length:0;});
+    html+='<div class="node-card'+selfCls+'">';
+    html+='<div class="node-card-header">'+statusDot+'<span class="name">'+esc(n.id)+'</span>'+selfTag+'<span class="ep">'+esc(n.endpoint)+'</span><span class="resource-model-count">'+totalModels+' model(s)</span></div>';
+
+    if(n.providers&&n.providers.length){
+      n.providers.forEach(function(p){
+        var healthyCls=p.healthy?'':'';
+        html+='<div class="provider-section">';
+        html+='<div class="provider-header"><span class="provider-badge '+p.type+'">'+esc(p.type)+'</span><span class="provider-url">'+esc(p.base_url)+'</span><span class="model-count">'+(p.models?p.models.length:0)+' model(s)</span></div>';
+        if(p.models&&p.models.length){
+          html+='<div class="model-grid">';
+          p.models.forEach(function(m){
+            var size=m.size_gb?' <span style="color:#6e7681;font-size:8px">('+m.size_gb+'GB)</span>':'';
+            html+='<span class="model-tag">'+esc(m.name)+size+'</span>';
+          });
+          html+='</div>';
+        }else if(!p.healthy){
+          html+='<div style="font-size:10px;color:#f85149;margin-top:2px">Unreachable</div>';
+        }
+        html+='</div>';
+      });
+    }else{
+      html+='<div style="font-size:10px;color:#6e7681;margin-top:6px">No providers detected on this node</div>';
+    }
+    html+='</div>';
+  });
+
+  el.innerHTML=html;
+}
+
 function initTabs(){
   document.querySelectorAll('.tab-btn').forEach(function(btn){
     btn.addEventListener('click',function(){
@@ -288,6 +370,7 @@ function initTabs(){
       btn.classList.add('active');
       document.getElementById('tab-'+tabId).classList.add('active');
       if(tabId==='jobs')loadJobs();
+      if(tabId==='resources')loadResources();
     });
   });
 }

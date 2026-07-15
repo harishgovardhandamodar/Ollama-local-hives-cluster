@@ -17,10 +17,11 @@ var (
 )
 
 type HiveServer struct {
-	queue   *OllamaQueue
-	mesh    *MeshDiscovery
-	clients *ClientManager
-	cfg     ServerConfig
+	queue    *OllamaQueue
+	mesh     *MeshDiscovery
+	clients  *ClientManager
+	cfg      ServerConfig
+	provider *ProviderManager
 }
 
 type ClientManager struct {
@@ -39,12 +40,13 @@ type ClientInfo struct {
 }
 
 type ServerConfig struct {
-	OllamaURL     string
-	OllamaModel   string
-	ServerPort    int
-	MaxConcurrent int
-	MeshEnabled   bool
-	MaxClients    int
+	OllamaURL          string
+	OllamaModel        string
+	ServerPort         int
+	MaxConcurrent      int
+	MeshEnabled        bool
+	MaxClients         int
+	CustomProviderURLs []string
 }
 
 func NewClientManager(maxClients int) *ClientManager {
@@ -139,11 +141,18 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 			cfg.OllamaModel,
 		)
 	}
+	provider := NewProviderManager(
+		getServerID(),
+		cfg.ServerPort,
+		cfg.OllamaURL,
+		cfg.CustomProviderURLs,
+	)
 	return &HiveServer{
-		queue:   queue,
-		mesh:    mesh,
-		clients: NewClientManager(cfg.MaxClients),
-		cfg:     cfg,
+		queue:    queue,
+		mesh:     mesh,
+		clients:  NewClientManager(cfg.MaxClients),
+		cfg:      cfg,
+		provider: provider,
 	}
 }
 
@@ -202,6 +211,9 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/peers", hs.handlePeers)
 	mux.HandleFunc("POST /api/peers/register", hs.handlePeerRegister)
 	mux.HandleFunc("/api/ollama/health", hs.handleOllamaHealth)
+	mux.HandleFunc("/api/nodes", hs.handleNodes)
+	mux.HandleFunc("/api/providers", hs.handleProviders)
+	mux.HandleFunc("/api/models", hs.handleModels)
 	mux.HandleFunc("/api/logs", hs.handleLogs)
 	mux.HandleFunc("POST /api/logs/clear", hs.handleLogsClear)
 }
@@ -232,6 +244,7 @@ func (hs *HiveServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"max_clients":  hs.cfg.MaxClients,
 		"mesh_enabled": hs.cfg.MeshEnabled,
 		"peers":        peers,
+		"hardware":     getHardwareInfo(),
 	})
 }
 
@@ -507,6 +520,35 @@ func (hs *HiveServer) handleOllamaHealth(w http.ResponseWriter, r *http.Request)
 		"status": "healthy",
 		"models": models,
 	})
+}
+
+func (hs *HiveServer) handleNodes(w http.ResponseWriter, r *http.Request) {
+	peers := hs.getPeers()
+	nodes := hs.provider.GetNodes(peers)
+	writeJSON(w, map[string]interface{}{
+		"nodes": nodes,
+	})
+}
+
+func (hs *HiveServer) handleProviders(w http.ResponseWriter, r *http.Request) {
+	providers := hs.provider.GetProviderTypes()
+	writeJSON(w, map[string]interface{}{
+		"providers": providers,
+	})
+}
+
+func (hs *HiveServer) handleModels(w http.ResponseWriter, r *http.Request) {
+	models := hs.provider.GetAggregatedModels()
+	writeJSON(w, map[string]interface{}{
+		"models": models,
+	})
+}
+
+func (hs *HiveServer) getPeers() []*PeerInfo {
+	if hs.mesh != nil {
+		return hs.mesh.GetAlivePeers()
+	}
+	return nil
 }
 
 func (hs *HiveServer) handleLogs(w http.ResponseWriter, r *http.Request) {
