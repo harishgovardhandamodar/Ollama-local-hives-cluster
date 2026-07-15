@@ -557,6 +557,7 @@ function initTabs(){
 }
 
 function fmtDuration(s){s=Math.abs(s);if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m '+Math.round(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}
+function fmtTime(epoch){var d=new Date(epoch*1000);return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function cleanLogLine(line){
   var idx=line.indexOf('] ');
@@ -575,7 +576,7 @@ async function pollLogs(){
         var panel=document.getElementById('logPanel');
         logs.forEach(function(l){
           var d=document.createElement('div');d.className='log-line';
-          d.innerHTML='<span class="ts">'+esc(l.ts||'')+'</span><span class="lvl '+l.level+'">'+l.level+'</span><span class="msg">'+esc(cleanLogLine(l.message)).split('\n')[0]+'</span>';
+          d.innerHTML='<span class="ts">'+fmtTime(l.epoch)+'</span><span class="lvl '+l.level+'">'+l.level+'</span><span class="msg">'+esc(cleanLogLine(l.message)).split('\n')[0]+'</span>';
           panel.appendChild(d);
         });
         panel.scrollTop=panel.scrollHeight;
