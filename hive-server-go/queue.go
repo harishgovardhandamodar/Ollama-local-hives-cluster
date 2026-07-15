@@ -32,6 +32,11 @@ type Job struct {
 	StartedAt     *float64   `json:"started_at,omitempty"`
 	CompletedAt   *float64   `json:"completed_at,omitempty"`
 	QueuePosition int        `json:"queue_position"`
+	Model         string     `json:"model,omitempty"`
+	PromptTokens  int        `json:"prompt_tokens,omitempty"`
+	EvalTokens    int        `json:"completion_tokens,omitempty"`
+	TotalTokens   int        `json:"total_tokens,omitempty"`
+	EvalDuration  float64    `json:"-"`
 }
 
 func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
@@ -178,6 +183,7 @@ func (q *OllamaQueue) executeJob(job *Job) {
 	} else {
 		job.Status = JobCompleted
 		job.Result = result
+		parseTokenMetrics(job, result)
 		if rec := recordFromResult(job, result); rec != nil && defaultDB != nil {
 			if err := defaultDB.Insert(*rec); err != nil {
 				logError("Failed to record token usage: %v", err)
@@ -469,32 +475,69 @@ func jobToMap(j *Job) map[string]interface{} {
 		"queue_position": j.QueuePosition,
 	}
 
-	if resultMap, ok := j.Result.(map[string]interface{}); ok {
-		if pc, ok := resultMap["prompt_eval_count"].(float64); ok {
-			m["prompt_tokens"] = int(pc)
-		}
-		if ec, ok := resultMap["eval_count"].(float64); ok {
-			m["completion_tokens"] = int(ec)
-		}
-		if mt, ok := resultMap["model"].(string); ok {
-			m["model"] = mt
-		}
-		pt, _ := m["prompt_tokens"].(int)
-		ct, _ := m["completion_tokens"].(int)
-		if pt > 0 || ct > 0 {
-			m["total_tokens"] = pt + ct
-		}
-		if j.StartedAt != nil && j.CompletedAt != nil {
-			dur := *j.CompletedAt - *j.StartedAt
-			m["duration_seconds"] = dur
-			total := pt + ct
-			if dur > 0 && total > 0 {
-				m["tokens_per_second"] = float64(total) / dur
+	if j.Model != "" {
+		m["model"] = j.Model
+	}
+
+	pt := j.PromptTokens
+	ct := j.EvalTokens
+	if pt > 0 {
+		m["prompt_tokens"] = pt
+	}
+	if ct > 0 {
+		m["completion_tokens"] = ct
+	}
+	if pt > 0 || ct > 0 {
+		m["total_tokens"] = pt + ct
+	}
+
+	if j.StartedAt != nil && j.CompletedAt != nil {
+		dur := *j.CompletedAt - *j.StartedAt
+		m["duration_seconds"] = dur
+		total := pt + ct
+		if dur > 0 && total > 0 {
+			m["tokens_per_second"] = float64(total) / dur
+		} else if dur > 0 && j.EvalDuration > 0 {
+			tps := float64(ct) / (j.EvalDuration / 1e9)
+			if tps > 0 {
+				m["tokens_per_second"] = tps
 			}
 		}
 	}
 
 	return m
+}
+
+func parseTokenMetrics(job *Job, result interface{}) {
+	resMap, ok := result.(map[string]interface{})
+	if !ok {
+		return
+	}
+	if m, _ := resMap["model"].(string); m != "" {
+		job.Model = m
+	}
+	if pc, ok := resMap["prompt_eval_count"].(float64); ok {
+		job.PromptTokens = int(pc)
+	}
+	if ec, ok := resMap["eval_count"].(float64); ok {
+		job.EvalTokens = int(ec)
+	}
+	job.TotalTokens = job.PromptTokens + job.EvalTokens
+	if ed, ok := resMap["eval_duration"].(float64); ok {
+		job.EvalDuration = ed
+	}
+
+	if job.PromptTokens == 0 && job.EvalTokens == 0 {
+		if usage, ok := resMap["usage"].(map[string]interface{}); ok {
+			if pt, ok := usage["prompt_tokens"].(float64); ok {
+				job.PromptTokens = int(pt)
+			}
+			if ct, ok := usage["completion_tokens"].(float64); ok {
+				job.EvalTokens = int(ct)
+			}
+			job.TotalTokens = job.PromptTokens + job.EvalTokens
+		}
+	}
 }
 
 func (q *OllamaQueue) CleanupOldJobs(maxAgeHours int) {
