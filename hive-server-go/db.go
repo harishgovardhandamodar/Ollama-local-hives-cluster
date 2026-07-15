@@ -228,6 +228,110 @@ func (s *DBStore) GetTimeSeries(model string, since float64) ([]TimeSeriesPoint,
 	return points, rows.Err()
 }
 
+type HistogramBin struct {
+	MinTPS float64 `json:"min_tps"`
+	MaxTPS float64 `json:"max_tps"`
+	Count  int     `json:"count"`
+}
+
+type HistogramResult struct {
+	Bins   []HistogramBin `json:"bins"`
+	MinTPS float64        `json:"min_tps"`
+	MaxTPS float64        `json:"max_tps"`
+	AvgTPS float64        `json:"avg_tps"`
+	Median float64        `json:"median_tps"`
+	Count  int            `json:"count"`
+	Model  string         `json:"model"`
+	Since  float64        `json:"since"`
+}
+
+func (s *DBStore) GetHistogram(model string, since float64, numBins int) (*HistogramResult, error) {
+	args := []interface{}{since}
+	query := `SELECT tokens_per_second FROM token_usage WHERE created_at >= ? AND tokens_per_second > 0`
+	if model != "" {
+		query += ` AND model = ?`
+		args = append(args, model)
+	}
+	query += ` ORDER BY tokens_per_second ASC`
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query histogram: %w", err)
+	}
+	defer rows.Close()
+
+	var values []float64
+	for rows.Next() {
+		var v float64
+		if err := rows.Scan(&v); err != nil {
+			continue
+		}
+		values = append(values, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	res := &HistogramResult{
+		MinTPS: 0,
+		MaxTPS: 0,
+		AvgTPS: 0,
+		Count:  len(values),
+		Model:  model,
+		Since:  since,
+	}
+
+	if len(values) == 0 {
+		res.Bins = make([]HistogramBin, 0)
+		return res, nil
+	}
+
+	res.MinTPS = values[0]
+	res.MaxTPS = values[len(values)-1]
+
+	var sum float64
+	for _, v := range values {
+		sum += v
+	}
+	res.AvgTPS = sum / float64(len(values))
+
+	mid := len(values) / 2
+	if len(values)%2 == 0 {
+		res.Median = (values[mid-1] + values[mid]) / 2
+	} else {
+		res.Median = values[mid]
+	}
+
+	rng := res.MaxTPS - res.MinTPS
+	if rng == 0 {
+		rng = 1
+	}
+	binSize := rng / float64(numBins)
+	counts := make([]int, numBins)
+	var maxCount int
+	for _, v := range values {
+		idx := int((v - res.MinTPS) / binSize)
+		if idx >= numBins {
+			idx = numBins - 1
+		}
+		counts[idx]++
+		if counts[idx] > maxCount {
+			maxCount = counts[idx]
+		}
+	}
+
+	res.Bins = make([]HistogramBin, numBins)
+	for i := 0; i < numBins; i++ {
+		res.Bins[i] = HistogramBin{
+			MinTPS: res.MinTPS + float64(i)*binSize,
+			MaxTPS: res.MinTPS + float64(i+1)*binSize,
+			Count:  counts[i],
+		}
+	}
+
+	return res, nil
+}
+
 func (s *DBStore) GetModels() ([]string, error) {
 	rows, err := s.db.QueryContext(context.Background(),
 		`SELECT DISTINCT model FROM token_usage ORDER BY model`)

@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	serverVersion = "1.3.0"
+	serverVersion = "1.4.0"
 	startTime     = time.Now()
 )
 
@@ -222,6 +222,7 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reports/usage", hs.handleUsageReport)
 	mux.HandleFunc("/api/reports/usage/recent", hs.handleUsageRecent)
 	mux.HandleFunc("/api/reports/usage/timeseries", hs.handleUsageTimeSeries)
+	mux.HandleFunc("/api/reports/usage/histogram", hs.handleUsageHistogram)
 }
 
 func (hs *HiveServer) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -656,6 +657,40 @@ func (hs *HiveServer) handleUsageTimeSeries(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, map[string]interface{}{
 		"points": points,
 		"models": models,
+	})
+}
+
+func (hs *HiveServer) handleUsageHistogram(w http.ResponseWriter, r *http.Request) {
+	if defaultDB == nil {
+		writeJSON(w, map[string]interface{}{"error": "no database"})
+		return
+	}
+	model := r.URL.Query().Get("model")
+	sinceStr := r.URL.Query().Get("since")
+	since := now() - 3600
+	if sinceStr != "" {
+		var s float64
+		fmt.Sscanf(sinceStr, "%f", &s)
+		if s > 0 {
+			since = s
+		}
+	}
+	binsStr := r.URL.Query().Get("bins")
+	numBins := 20
+	if binsStr != "" {
+		var b int
+		fmt.Sscanf(binsStr, "%d", &b)
+		if b > 0 && b <= 200 {
+			numBins = b
+		}
+	}
+	result, err := defaultDB.GetHistogram(model, since, numBins)
+	if err != nil {
+		writeJSON(w, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"histogram": result,
 	})
 }
 

@@ -76,6 +76,9 @@ tr:hover td{background:#1c2129}
 .chart-tab{font-size:9px;padding:1px 7px;border-radius:4px;cursor:pointer;color:#6e7681;border:1px solid transparent;transition:all .15s}
 .chart-tab:hover{color:#e1e4e8;border-color:#30363d}
 .chart-tab.active{color:#39d2c0;border-color:#39d2c0;background:rgba(57,210,192,.08)}
+.range-tab{font-size:9px;padding:1px 6px;border-radius:4px;cursor:pointer;color:#6e7681;border:1px solid transparent;transition:all .15s;font-family:monospace}
+.range-tab:hover{color:#e1e4e8;border-color:#30363d}
+.range-tab.active{color:#f0883e;border-color:#f0883e;background:rgba(240,136,62,.08)}
 .tabs{display:flex;gap:0;background:#1c2129;border-bottom:1px solid #30363d;flex-wrap:wrap;border-radius:10px 10px 0 0}
 .tab-btn{background:none;border:none;padding:8px 14px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;color:#8b949e;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
 .tab-btn:hover{color:#e1e4e8;background:#21262d}
@@ -140,7 +143,7 @@ select:focus{border-color:#58a6ff}
 <div class="header">
   <div class="status-dot ok" id="ollamaDot"></div>
   <h1>Hive Server Go</h1>
-  <span class="badge" id="versionBadge">v1.3.0</span>
+  <span class="badge" id="versionBadge">v1.4.0</span>
   <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
   <div class="meta">
     <span id="serverId"></span>
@@ -191,6 +194,14 @@ select:focus{border-color:#58a6ff}
           <select id="tpsModelSelect" onchange="loadTPSChart()">
             <option value="">All</option>
           </select>
+          <span style="display:flex;gap:2px;margin-left:6px">
+            <span class="range-tab active" data-range="3600" onclick="setTimeRange(3600)">1h</span>
+            <span class="range-tab" data-range="86400" onclick="setTimeRange(86400)">24h</span>
+            <span class="range-tab" data-range="259200" onclick="setTimeRange(259200)">3d</span>
+            <span class="range-tab" data-range="604800" onclick="setTimeRange(604800)">7d</span>
+            <span class="range-tab" data-range="2592000" onclick="setTimeRange(2592000)">30d</span>
+            <span class="range-tab" data-range="0" onclick="setTimeRange(0)">Max</span>
+          </span>
           <span class="spacer"></span>
           <span class="info" id="tpsRange"></span>
           </div>
@@ -240,7 +251,7 @@ select:focus{border-color:#58a6ff}
 
 <script>
 var TYPE_LABELS={generate:'Generate',chat:'Chat',embed:'Embed',list_models:'List Models',pull_model:'Pull Model',custom_prompt:'Custom Prompt'};
-var lastLogTime=0,_statusData={},_peersData=[],logPolling=false,logFilter='',chartType='line';
+var lastLogTime=0,_statusData={},_peersData=[],logPolling=false,logFilter='',chartType='line',timeRange=3600;
 
 async function refresh(){
   try{
@@ -483,20 +494,33 @@ function setChartType(tp){
   loadTPSChart();
 }
 
+function setTimeRange(secs){
+  timeRange=secs;
+  document.querySelectorAll('.range-tab').forEach(function(el){
+    el.classList.toggle('active',parseInt(el.dataset.range)===secs);
+  });
+  loadTPSChart();
+}
+
 async function loadTPSChart(){
   try{
     var sel=document.getElementById('tpsModelSelect');
     var model=sel.value||'';
-    var since=Date.now()/1000-86400;
-    var r=await fetch('/api/reports/usage/timeseries?model='+encodeURIComponent(model)+'&since='+since).then(function(x){return x.json()});
-    var pts=r.points||[];
-    var prev=r.models||[];
-    var cur=sel.value;
-    sel.innerHTML='<option value="">All</option>';
-    prev.forEach(function(m){sel.innerHTML+='<option value="'+esc(m)+'"'+(m===cur?' selected':'')+'>'+esc(m)+'</option>';});
-    if(!cur&&prev.length) sel.value='';
-    if(chartType==='hist') drawTPSHistogram(pts);
-    else drawTPSChart(pts);
+    var since=timeRange>0?Date.now()/1000-timeRange:0;
+    if(chartType==='hist'){
+      var r=await fetch('/api/reports/usage/histogram?model='+encodeURIComponent(model)+'&since='+since+'&bins=25').then(function(x){return x.json()});
+      var hist=r.histogram||{bins:[],min_tps:0,max_tps:0,avg_tps:0,median_tps:0,count:0};
+      drawTPSHistogram(hist);
+    }else{
+      var r=await fetch('/api/reports/usage/timeseries?model='+encodeURIComponent(model)+'&since='+since).then(function(x){return x.json()});
+      var pts=r.points||[];
+      var prev=r.models||[];
+      var cur=sel.value;
+      sel.innerHTML='<option value="">All</option>';
+      prev.forEach(function(m){sel.innerHTML+='<option value="'+esc(m)+'"'+(m===cur?' selected':'')+'>'+esc(m)+'</option>';});
+      if(!cur&&prev.length) sel.value='';
+      drawTPSChart(pts);
+    }
   }catch(e){}
 }
 
@@ -570,7 +594,7 @@ function drawTPSChart(pts){
   ctx.fillText('now',x(last.timestamp)+4,y(last.timestamp)+8);
 }
 
-function drawTPSHistogram(pts){
+function drawTPSHistogram(hist){
   var canvas=document.getElementById('tpsChart');
   var ctx=canvas.getContext('2d');
   var rect=canvas.parentElement.getBoundingClientRect();
@@ -578,28 +602,20 @@ function drawTPSHistogram(pts){
   ctx.scale(2,2);
   var W=canvas.width/2,H=canvas.height/2;
   ctx.clearRect(0,0,W,H);
-  document.getElementById('tpsRange').textContent=pts.length+' pts';
-  if(!pts.length){
+  document.getElementById('tpsRange').textContent=hist.count+' samples';
+  if(!hist.bins||!hist.bins.length){
     ctx.fillStyle='#6e7681';ctx.font='11px sans-serif';ctx.textAlign='center';
     ctx.fillText('No TPS data',W/2,H/2);return;
   }
 
-  var bins=20;
-  var maxTPS=0,minTPS=Infinity;
-  pts.forEach(function(p){if(p.tps>maxTPS)maxTPS=p.tps;if(p.tps<minTPS)minTPS=p.tps;});
-  if(maxTPS===0)maxTPS=1;
-  var range=maxTPS-minTPS||1;
-  var binSize=range/bins;
-  var counts=new Array(bins).fill(0);
-  pts.forEach(function(p){
-    var idx=Math.min(bins-1,Math.floor((p.tps-minTPS)/binSize));
-    counts[idx]++;
-  });
-  var maxCount=Math.max(1,...counts);
+  var bins=hist.bins;
+  var maxCount=0;
+  bins.forEach(function(b){if(b.count>maxCount)maxCount=b.count;});
+  maxCount=Math.max(1,maxCount);
 
   var pad=10,topPad=14,bottomPad=22,leftPad=42,rightPad=14;
   var plotW=W-leftPad-rightPad,plotH=H-topPad-bottomPad;
-  var barW=plotW/bins;
+  var barW=plotW/bins.length;
 
   ctx.strokeStyle='#21262d';ctx.lineWidth=0.5;
   var steps=4;
@@ -612,32 +628,25 @@ function drawTPSHistogram(pts){
   }
 
   ctx.fillStyle='rgba(57,210,192,0.6)';
-  for(var i=0;i<bins;i++){
-    var barH=(counts[i]/maxCount)*plotH;
+  bins.forEach(function(b,i){
+    var barH=(b.count/maxCount)*plotH;
     var x=leftPad+i*barW+1;
     var w=Math.max(1,barW-2);
     var y=topPad+plotH-barH;
     ctx.fillRect(x,y,w,barH);
-  }
+  });
 
-  ctx.fillStyle='#8b949e';ctx.font='8px monospace';ctx.textAlign='right';
-  var midBin=Math.floor(bins/4);
-  var labelBins=[0,midBin,Math.floor(bins/2),bins-midBin-1,bins-1];
-  labelBins.forEach(function(i){
-    var val=(minTPS+i*binSize).toFixed(1);
-    ctx.fillText(val,leftPad+i*barW+barW/2+8,H-4);
+  var labelIdx=[0,Math.floor(bins.length/4),Math.floor(bins.length/2),Math.floor(3*bins.length/4),bins.length-1];
+  ctx.fillStyle='#6e7681';ctx.font='7px monospace';ctx.textAlign='center';
+  labelIdx.forEach(function(i){
+    var val=bins[i].min_tps.toFixed(1);
+    ctx.fillText(val,leftPad+i*barW+barW/2,H-3);
   });
 
   ctx.fillStyle='#8b949e';ctx.font='8px sans-serif';ctx.textAlign='right';
-  ctx.fillText('bins: '+bins+'  |  median: '+median(pts.map(function(p){return p.tps;})).toFixed(1)+' tok/s',leftPad+plotW,topPad+10);
+  ctx.fillText('avg: '+hist.avg_tps.toFixed(1)+' · median: '+hist.median_tps.toFixed(1)+' tok/s  |  range: '+hist.min_tps.toFixed(1)+' – '+hist.max_tps.toFixed(1),leftPad+plotW,topPad+10);
   ctx.fillStyle='#6e7681';ctx.font='7px sans-serif';ctx.textAlign='center';
   ctx.fillText('TPS bucket',W/2,H-1);
-}
-
-function median(arr){
-  var s=arr.slice().sort(function(a,b){return a-b;});
-  var mid=Math.floor(s.length/2);
-  return s.length%2?s[mid]:(s[mid-1]+s[mid])/2;
 }
 
 function initTabs(){
