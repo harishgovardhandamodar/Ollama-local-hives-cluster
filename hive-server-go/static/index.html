@@ -81,6 +81,10 @@ tr:hover td{background:#1c2129}
 .provider-badge.vllm{background:rgba(137,87,229,.15);color:#bc8cff;border:1px solid rgba(137,87,229,.3)}
 .provider-badge.openai_compatible{background:rgba(46,160,67,.15);color:#2ea043;border:1px solid rgba(46,160,67,.3)}
 .provider-badge.custom{background:rgba(139,148,158,.15);color:#8b949e;border:1px solid rgba(139,148,158,.3)}
+.serving-type{font-size:9px;padding:2px 7px;border-radius:8px;font-weight:600;display:inline-block}
+.serving-type.gpu{background:rgba(137,87,229,.15);color:#bc8cff;border:1px solid rgba(137,87,229,.3)}
+.serving-type.cpu{background:rgba(139,148,158,.15);color:#8b949e;border:1px solid rgba(139,148,158,.3)}
+.serving-type.mlx{background:rgba(46,160,67,.15);color:#2ea043;border:1px solid rgba(46,160,67,.3)}
 .model-grid{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px}
 .model-tag{font-size:9px;padding:2px 8px;border-radius:10px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;cursor:default}
 .model-tag:hover{border-color:#58a6ff}
@@ -404,10 +408,14 @@ function renderReports(data){
     return;
   }
 
-  var html='<table><tr><th>Provider</th><th>Model</th><th>Prompt</th><th>Completion</th><th>Total</th><th>Avg Tok/s</th><th>Avg Latency</th><th>Jobs</th></tr>';
+  var html='<table><tr><th>Provider</th><th>Model</th><th>Serving</th><th>Prompt</th><th>Completion</th><th>Total</th><th>Avg Tok/s</th><th>Avg Latency</th><th>Jobs</th></tr>';
   reports.forEach(function(r){
+    var st=r.serving_type||'';
+    var stTag=st?' <span class="serving-type '+st.toLowerCase()+'">'+esc(st)+'</span>':'';
+    var sn=r.serving_node||'';
     html+='<tr><td><span class="provider-badge '+r.provider+'">'+esc(r.provider)+'</span></td>'+
       '<td style="font-size:11px;font-family:monospace">'+esc(r.model)+'</td>'+
+      '<td style="font-size:10px">'+stTag+'<span style="color:#6e7681;margin-left:2px">'+esc(sn.substring(0,20))+'</span></td>'+
       '<td class="token-num">'+fmtNum(r.total_prompts)+'</td>'+
       '<td class="token-num">'+fmtNum(r.total_completions)+'</td>'+
       '<td class="token-num">'+fmtNum(r.total_tokens)+'</td>'+
@@ -416,7 +424,27 @@ function renderReports(data){
       '<td>'+r.job_count+'</td></tr>';
   });
   html+='</table>';
-  document.getElementById('reportsTable').innerHTML=html;
+
+  html+='<div style="margin-top:16px"><h2 style="font-size:12px;text-transform:uppercase;letter-spacing:.3px;color:#8b949e;margin-bottom:8px">Recent Requests</h2></div>';
+
+  fetch('/api/reports/usage/recent').then(function(x){return x.json()}).then(function(d){
+    var recs=d.records||[];
+    if(!recs.length){document.getElementById('reportsTable').innerHTML=html+'<div class="empty">No recent requests</div>';return;}
+    var rhtml='<table><tr><th>Job</th><th>Type</th><th>Model</th><th>Serving</th><th>Tokens</th><th>Tok/s</th><th>Latency</th></tr>';
+    recs.forEach(function(j){
+      var st=j.serving_type||'';
+      var stTag=st?' <span class="serving-type '+st.toLowerCase()+'">'+esc(st)+'</span>':'';
+      rhtml+='<tr><td class="job-id" title="'+esc(j.job_id||'')+'">'+esc((j.job_id||'').substring(0,28))+'</td>'+
+        '<td class="job-type" style="font-size:10px">'+esc(j.job_type||'')+'</td>'+
+        '<td style="font-size:10px;font-family:monospace">'+esc(j.model||'')+'</td>'+
+        '<td style="font-size:10px">'+stTag+'</td>'+
+        '<td class="token-num" style="font-size:11px">'+j.total_tokens+' ('+j.prompt_tokens+'p/'+j.completion_tokens+'c)</td>'+
+        '<td class="token-num" style="font-size:11px;color:#f0883e">'+fmtTPS(j.tokens_per_second)+'</td>'+
+        '<td class="token-num" style="font-size:11px;color:#f85149">'+fmtDur(j.duration_seconds)+'</td></tr>';
+    });
+    rhtml+='</table>';
+    document.getElementById('reportsTable').innerHTML=html+rhtml;
+  }).catch(function(){document.getElementById('reportsTable').innerHTML=html+'<div class="empty">Failed to load recent requests</div>';});
 }
 
 function initTabs(){

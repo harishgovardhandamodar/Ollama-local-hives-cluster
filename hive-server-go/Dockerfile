@@ -15,7 +15,7 @@
 FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY hive-server-go/ ./hive-server-go/
 RUN cd hive-server-go && go build -o hive-server-go .
 

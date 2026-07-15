@@ -178,8 +178,10 @@ func (q *OllamaQueue) executeJob(job *Job) {
 	} else {
 		job.Status = JobCompleted
 		job.Result = result
-		if rec := recordFromResult(job, result); rec != nil {
-			defaultTracker.Record(*rec)
+		if rec := recordFromResult(job, result); rec != nil && defaultDB != nil {
+			if err := defaultDB.Insert(*rec); err != nil {
+				logError("Failed to record token usage: %v", err)
+			}
 		}
 		logInfo("Job %s completed: type=%s", job.ID, job.JobType)
 	}

@@ -15,6 +15,8 @@ func main() {
 	maxClients := getEnvInt("MAX_CLIENTS", 5)
 	customProviders := splitAndTrim(os.Getenv("CUSTOM_PROVIDER_URLS"), ",")
 
+	initDB()
+
 	cfg := ServerConfig{
 		OllamaURL:          ollamaURL,
 		OllamaModel:        ollamaModel,

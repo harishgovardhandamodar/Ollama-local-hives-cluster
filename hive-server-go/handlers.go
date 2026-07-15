@@ -632,13 +632,32 @@ func (hs *HiveServer) handleLogsClear(w http.ResponseWriter, r *http.Request) {
 }
 
 func (hs *HiveServer) handleUsageReport(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, defaultTracker.GetSummary())
+	if defaultDB == nil {
+		writeJSON(w, map[string]interface{}{
+			"error": "database not available",
+		})
+		return
+	}
+	summary, err := defaultDB.GetSummary()
+	if err != nil {
+		writeJSON(w, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	writeJSON(w, summary)
 }
 
 func (hs *HiveServer) handleUsageRecent(w http.ResponseWriter, r *http.Request) {
-	limit := 50
+	if defaultDB == nil {
+		writeJSON(w, map[string]interface{}{"records": []interface{}{}})
+		return
+	}
+	records, err := defaultDB.GetRecent(100)
+	if err != nil {
+		writeJSON(w, map[string]interface{}{"error": err.Error()})
+		return
+	}
 	writeJSON(w, map[string]interface{}{
-		"records": defaultTracker.GetRecentUsage(limit),
+		"records": records,
 	})
 }
 
