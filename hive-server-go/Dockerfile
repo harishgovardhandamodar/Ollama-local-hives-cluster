@@ -1,6 +1,12 @@
 # Multi-stage build for hive-server-go
 # Supports Linux (CPU + Nvidia GPU), macOS, and Windows via Docker
 #
+# Build context must be the repo root, not the hive-server-go directory.
+# Correct command from repo root:
+#   docker build -t hive-server-go -f hive-server-go/Dockerfile .
+# Wrong command that causes missing file errors:
+#   docker build -t hive-server-go -f hive-server-go/Dockerfile hive-server-go
+#
 # Nvidia GPU support (Linux only):
 #   docker run --gpus all -p 8081:8081 ... hive-server-go:latest
 # The --gpus all flag makes nvidia-smi available inside the container

@@ -12,6 +12,9 @@ OLLAMA_BASE_URL=http://localhost:11434 ./hive-server-go
 # Docker (build from repo root — context must be ., not hive-server-go/)
 docker build -t hive-server-go -f hive-server-go/Dockerfile .
 
+# Wrong build command that causes missing-path errors:
+# docker build -t hive-server-go -f hive-server-go/Dockerfile hive-server-go
+
 # Docker (run)
 docker run -d --name hive-server -p 8081:8081 \
   -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
