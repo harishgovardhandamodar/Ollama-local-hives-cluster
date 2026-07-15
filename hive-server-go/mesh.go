@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -116,8 +117,24 @@ func (m *MeshDiscovery) probeSeed(addr string) bool {
 	}
 	m.mu.Unlock()
 
+	m.introduceSelf(baseURL)
 	m.exchangePeers(baseURL)
 	return true
+}
+
+func (m *MeshDiscovery) introduceSelf(peerBaseURL string) {
+	body, _ := json.Marshal(map[string]interface{}{
+		"server_id":      m.serverID,
+		"endpoint":       fmt.Sprintf("http://localhost:%d", m.serverPort),
+		"max_concurrent": m.maxConcurrent,
+		"ollama_model":   m.ollamaModel,
+	})
+	resp, err := m.httpClient.Post(peerBaseURL+"/api/peers/introduce", "application/json", bytes.NewReader(body))
+	if err != nil {
+		logWarn("Failed to introduce self to %s: %v", peerBaseURL, err)
+		return
+	}
+	defer resp.Body.Close()
 }
 
 func (m *MeshDiscovery) exchangePeers(baseURL string) {
@@ -345,6 +362,26 @@ func (m *MeshDiscovery) UnregisterPeer(serverID string) {
 	defer m.mu.Unlock()
 	delete(m.peers, serverID)
 	logInfo("Removed peer: %s", serverID)
+}
+
+func (m *MeshDiscovery) Rescan(seedPeers []string) {
+	for _, addr := range seedPeers {
+		m.probeSeed(addr)
+	}
+	logInfo("Mesh re-scan complete")
+}
+
+func (m *MeshDiscovery) GetDiagnostics() map[string]interface{} {
+	alive := m.GetAlivePeers()
+	return map[string]interface{}{
+		"enabled":        true,
+		"server_id":      m.serverID,
+		"discovery_port": m.discoveryPort,
+		"server_port":    m.serverPort,
+		"peers_total":    len(m.peers),
+		"peers_alive":    len(alive),
+		"seed_peers":     getSeedPeers(),
+	}
 }
 
 func (m *MeshDiscovery) GetPeersList() []PeerInfo {
