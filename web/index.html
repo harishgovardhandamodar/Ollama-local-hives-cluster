@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hive Cluster Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0a0e17;--surface:#111827;--surface2:#1a2332;--border:#1e293b;--accent:#22d3ee;--accent2:#a78bfa;--green:#22c55e;--yellow:#eab308;--red:#ef4444;--text:#e2e8f0;--text2:#94a3b8}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+.header{background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#0f172a 100%);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between}
+.header h1{font-size:20px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:flex;align-items:center;gap:10px}
+.header h1 .icon{font-size:24px;-webkit-text-fill-color:initial}
+.status-bar{display:flex;gap:16px;align-items:center;font-size:13px}
+.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.status-dot.online{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.offline{background:var(--red)}
+.main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px;max-width:1600px;margin:0 auto}
+@media(max-width:1200px){.main{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.card-header{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+.card-header h2{font-size:14px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.5px}
+.card-body{padding:18px}
+.full-width{grid-column:1/-1}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.stat-card{background:var(--surface2);border-radius:8px;padding:14px;text-align:center}
+.stat-value{font-size:28px;font-weight:700;color:var(--accent)}
+.stat-value.green{color:var(--green)}
+.stat-value.yellow{color:var(--yellow)}
+.stat-value.red{color:var(--red)}
+.stat-value.purple{color:var(--accent2)}
+.stat-label{font-size:11px;color:var(--text2);margin-top:4px;text-transform:uppercase;letter-spacing:.5px}
+.node-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.node-card{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:16px;transition:border-color .2s}
+.node-card:hover{border-color:var(--accent)}
+.node-card.offline{opacity:.5;border-color:var(--red)}
+.node-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.node-name{font-size:15px;font-weight:600}
+.node-id{font-size:11px;color:var(--text2);font-family:monospace}
+.node-badge{font-size:11px;padding:2px 8px;border-radius:999px;font-weight:500}
+.badge-online{background:rgba(34,197,94,.15);color:var(--green)}
+.badge-offline{background:rgba(239,68,68,.15);color:var(--red)}
+.badge-drain{background:rgba(234,179,8,.15);color:var(--yellow)}
+.hw-badge{font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(167,139,250,.15);color:var(--accent2);margin-top:4px;display:inline-block}
+.node-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.node-stat{font-size:12px}
+.node-stat-label{color:var(--text2);margin-bottom:2px}
+.bar-track{background:var(--bg);border-radius:4px;height:6px;overflow:hidden}
+.bar-fill{height:100%;border-radius:4px;transition:width .5s ease}
+.bar-cpu{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.bar-mem{background:linear-gradient(90deg,var(--green),var(--accent))}
+.bar-vram{background:linear-gradient(90deg,var(--accent2),var(--red))}
+.bar-conn{background:linear-gradient(90deg,var(--yellow),var(--green))}
+.node-models{margin-top:10px;display:flex;flex-wrap:wrap;gap:4px}
+.model-tag{font-size:10px;padding:2px 6px;background:rgba(34,211,238,.1);color:var(--accent);border-radius:4px;border:1px solid rgba(34,211,238,.2)}
+.queue-list{max-height:300px;overflow-y:auto}
+.queue-item{display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid var(--border);font-size:13px}
+.queue-item:last-child{border-bottom:none}
+.queue-id{font-family:monospace;font-size:11px;color:var(--text2);width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.queue-model{font-weight:500;flex:1}
+.queue-status{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500}
+.q-pending{background:rgba(234,179,8,.15);color:var(--yellow)}
+.q-running{background:rgba(34,211,238,.15);color:var(--accent)}
+.q-complete{background:rgba(34,197,94,.15);color:var(--green)}
+.q-failed{background:rgba(239,68,68,.15);color:var(--red)}
+.q-timeout{background:rgba(239,68,68,.15);color:var(--red)}
+.queue-node{font-size:11px;color:var(--text2)}
+.queue-time{font-size:11px;color:var(--text2);white-space:nowrap}
+.empty-state{text-align:center;padding:40px;color:var(--text2);font-size:13px}
+.strategy-select{padding:4px 8px;border-radius:6px;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:12px;cursor:pointer}
+.model-matrix{width:100%}
+.model-matrix th,.model-matrix td{padding:8px 12px;text-align:left;font-size:13px;border-bottom:1px solid var(--border)}
+.model-matrix th{color:var(--text2);font-weight:500;font-size:12px}
+.model-matrix td{color:var(--text)}
+.available{color:var(--green)}
+.unavailable{color:var(--text2);opacity:.3}
+.conn-indicator{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px}
+.scrollable{max-height:350px;overflow-y:auto}
+.scrollable::-webkit-scrollbar{width:4px}
+.scrollable::-webkit-scrollbar-track{background:transparent}
+.scrollable::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1><span class="icon">蜂</span> Hive Cluster</h1>
+  <div class="status-bar">
+    <span><span class="status-dot online" id="ws-dot"></span> <span id="conn-status">Connecting...</span></span>
+    <span id="node-count-header">0 nodes</span>
+  </div>
+</div>
+
+<div class="main">
+  <div class="card full-width">
+    <div class="card-body">
+      <div class="stats-row" id="stats-row">
+        <div class="stat-card"><div class="stat-value" id="stat-total">0</div><div class="stat-label">Total Nodes</div></div>
+        <div class="stat-card"><div class="stat-value green" id="stat-online">0</div><div class="stat-label">Online</div></div>
+        <div class="stat-card"><div class="stat-value yellow" id="stat-slots">0/0</div><div class="stat-label">Slots Used</div></div>
+        <div class="stat-card"><div class="stat-value purple" id="stat-queue">0</div><div class="stat-label">Queue Depth</div></div>
+        <div class="stat-card"><div class="stat-value" id="stat-active">0</div><div class="stat-label">Active Requests</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card full-width">
+    <div class="card-header">
+      <h2>Cluster Nodes</h2>
+      <select class="strategy-select" id="strategy-select" onchange="setStrategy(this.value)">
+        <option value="least_load">Least Load</option>
+        <option value="round_robin">Round Robin</option>
+        <option value="random">Random</option>
+        <option value="capacity">Best Capacity</option>
+      </select>
+    </div>
+    <div class="card-body">
+      <div class="node-grid" id="node-grid">
+        <div class="empty-state">Waiting for nodes to register...</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Active Requests</h2></div>
+    <div class="card-body">
+      <div class="queue-list scrollable" id="active-list">
+        <div class="empty-state">No active requests</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header"><h2>Request Queue</h2></div>
+    <div class="card-body">
+      <div class="queue-list scrollable" id="queue-list">
+        <div class="empty-state">Queue is empty</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card full-width">
+    <div class="card-header"><h2>Recent History</h2></div>
+    <div class="card-body">
+      <div class="queue-list scrollable" id="history-list">
+        <div class="empty-state">No history yet</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card full-width">
+    <div class="card-header"><h2>Model Availability</h2></div>
+    <div class="card-body">
+      <table class="model-matrix" id="model-table">
+        <thead><tr><th>Model</th><th>Available Nodes</th><th>Status</th></tr></thead>
+        <tbody id="model-body"><tr><td colspan="3" class="empty-state">No models loaded</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+let ws;let lastData=null;
+function connect(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  // SSE fallback via polling since this is a single-page served by the same Go server
+  connectSSE();
+}
+function connectSSE(){
+  if(typeof(EventSource)!=='undefined'){
+    const es=new EventSource('/api/sse');
+    es.onmessage=function(e){
+      try{update(JSON.parse(e.data))}catch(err){console.error(err)}
+    };
+    es.onerror=function(){
+      document.getElementById('ws-dot').className='status-dot offline';
+      document.getElementById('conn-status').textContent='Reconnecting...';
+      setTimeout(()=>{es.close();connectSSE()},3000);
+    };
+    es.onopen=function(){
+      document.getElementById('ws-dot').className='status-dot online';
+      document.getElementById('conn-status').textContent='Connected';
+    };
+  } else {
+    pollLoop();
+  }
+}
+function pollLoop(){
+  fetch('/api/status').then(r=>r.json()).then(d=>{update(d);setTimeout(pollLoop,2000)}).catch(()=>setTimeout(pollLoop,5000));
+}
+
+function update(d){
+  lastData=d;
+  const nodes=d.nodes||[];
+  const online=nodes.filter(n=>n.status==='online');
+  document.getElementById('stat-total').textContent=nodes.length;
+  document.getElementById('stat-online').textContent=online.length;
+  document.getElementById('stat-slots').textContent=(d.used_slots||0)+'/'+(d.total_slots||0);
+  document.getElementById('stat-queue').textContent=d.queue_depth||0;
+  document.getElementById('stat-active').textContent=(d.active||[]).length;
+  document.getElementById('node-count-header').textContent=nodes.length+' nodes';
+  if(d.strategy)document.getElementById('strategy-select').value=d.strategy;
+  renderNodes(nodes);
+  renderActive(d.active||[]);
+  renderQueue(d.history||[]);
+  renderHistory(d.history||[]);
+  renderModels(nodes);
+}
+
+function renderNodes(nodes){
+  const g=document.getElementById('node-grid');
+  if(!nodes.length){g.innerHTML='<div class="empty-state">No nodes registered</div>';return}
+  g.innerHTML=nodes.map(n=>{
+    const cpuPct=Math.round(n.cpu_usage||0);
+    const memPct=n.memory_total_gb>0?Math.round((n.memory_used_gb/n.memory_total_gb)*100):0;
+    const vramPct=n.vram_total_gb>0?Math.round((n.vram_used_gb/n.vram_total_gb)*100):0;
+    const connPct=n.capacity>0?Math.round((n.active_connections/n.capacity)*100):0;
+    const hwLabels={'apple-silicon':'Apple Silicon','nvidia-gpu':'NVIDIA GPU','nvidia-dgx':'NVIDIA DGX','cpu':'CPU','unknown':'Unknown'};
+    return `<div class="node-card ${n.status}">
+      <div class="node-header">
+        <div>
+          <div class="node-name">${esc(n.name||n.id)}</div>
+          <div class="node-id">${esc(n.id)}</div>
+          <div class="hw-badge">${hwLabels[n.hardware]||n.hardware}${n.gpu_model?' · '+esc(n.gpu_model):''}</div>
+        </div>
+        <span class="node-badge badge-${n.status}">${n.status}</span>
+      </div>
+      <div class="node-stats">
+        <div class="node-stat"><div class="node-stat-label">CPU ${cpuPct}%</div><div class="bar-track"><div class="bar-fill bar-cpu" style="width:${cpuPct}%"></div></div></div>
+        <div class="node-stat"><div class="node-stat-label">RAM ${n.memory_used_gb?n.memory_used_gb.toFixed(1):'?'}GB / ${n.memory_total_gb?n.memory_total_gb.toFixed(1):'?'}GB</div><div class="bar-track"><div class="bar-fill bar-mem" style="width:${memPct}%"></div></div></div>
+        ${n.vram_total_gb>0?`<div class="node-stat"><div class="node-stat-label">VRAM ${n.vram_used_gb?n.vram_used_gb.toFixed(1):'?'}GB / ${n.vram_total_gb?n.vram_total_gb.toFixed(1):'?'}GB</div><div class="bar-track"><div class="bar-fill bar-vram" style="width:${vramPct}%"></div></div></div>`:''}
+        <div class="node-stat"><div class="node-stat-label">Connections ${n.active_connections||0} / ${n.capacity}</div><div class="bar-track"><div class="bar-fill bar-conn" style="width:${connPct}%"></div></div></div>
+      </div>
+      ${(n.models&&n.models.length)?`<div class="node-models">${n.models.map(m=>`<span class="model-tag">${esc(m)}</span>`).join('')}</div>`:''}
+    </div>`}).join('');
+}
+
+function renderActive(reqs){
+  const el=document.getElementById('active-list');
+  if(!reqs.length){el.innerHTML='<div class="empty-state">No active requests</div>';return}
+  el.innerHTML=reqs.map(r=>`<div class="queue-item">
+    <span class="conn-indicator" style="background:var(--accent)"></span>
+    <span class="queue-id" title="${esc(r.id)}">${esc(r.id)}</span>
+    <span class="queue-model">${esc(r.model||'unknown')}</span>
+    <span class="queue-status q-running">RUNNING</span>
+    <span class="queue-node">${esc(r.node_id||'')}</span>
+    <span class="queue-time">${r.started_at?timeAgo(r.started_at):''}</span>
+  </div>`).join('');
+}
+
+function renderQueue(reqs){
+  const el=document.getElementById('queue-list');
+  const pending=reqs.filter(r=>r.status==='pending');
+  if(!pending.length){el.innerHTML='<div class="empty-state">Queue is empty</div>';return}
+  el.innerHTML=pending.slice(0,50).map(r=>`<div class="queue-item">
+    <span class="queue-id" title="${esc(r.id)}">${esc(r.id)}</span>
+    <span class="queue-model">${esc(r.model||'unknown')}</span>
+    <span class="queue-status q-${r.status}">${r.status.toUpperCase()}</span>
+    <span class="queue-time">${timeAgo(r.created_at)}</span>
+  </div>`).join('');
+}
+
+function renderHistory(reqs){
+  const el=document.getElementById('history-list');
+  if(!reqs.length){el.innerHTML='<div class="empty-state">No history yet</div>';return}
+  el.innerHTML=reqs.slice(0,30).map(r=>`<div class="queue-item">
+    <span class="queue-id" title="${esc(r.id)}">${esc(r.id)}</span>
+    <span class="queue-model">${esc(r.model||'unknown')}</span>
+    <span class="queue-status q-${r.status}">${r.status.toUpperCase()}</span>
+    <span class="queue-node">${esc(r.node_id||'')}</span>
+    <span class="queue-time">${r.completed_at?timeAgo(r.completed_at):''}</span>
+  </div>`).join('');
+}
+
+function renderModels(nodes){
+  const modelMap={};
+  nodes.forEach(n=>{
+    if(n.status!=='online')return;
+    (n.models||[]).forEach(m=>{
+      if(!modelMap[m])modelMap[m]=[];
+      modelMap[m].push(n.name||n.id);
+    });
+  });
+  const body=document.getElementById('model-body');
+  const models=Object.keys(modelMap).sort();
+  if(!models.length){body.innerHTML='<tr><td colspan="3" class="empty-state">No models loaded</td></tr>';return}
+  body.innerHTML=models.map(m=>`<tr>
+    <td><strong>${esc(m)}</strong></td>
+    <td>${modelMap[m].join(', ')}</td>
+    <td class="available">Available</td>
+  </tr>`).join('');
+}
+
+function setStrategy(s){
+  fetch('/api/strategy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({strategy:s})});
+}
+
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function timeAgo(t){
+  if(!t)return'';
+  const d=typeof t==='string'?new Date(t):t;
+  const s=Math.floor((Date.now()-d.getTime())/1000);
+  if(s<60)return s+'s ago';
+  if(s<3600)return Math.floor(s/60)+'m ago';
+  return Math.floor(s/3600)+'h ago';
+}
+
+connect();
+</script>
+</body>
+</html>
