@@ -176,6 +176,23 @@ select:focus{border-color:#58a6ff}
       </div>
 
       <div class="card full">
+        <h2>Token Usage <span class="count" id="sideUsageCompact" style="font-size:13px;font-weight:400;color:#8b949e"></span></h2>
+        <div class="sidebar-stat" id="sideUsage"></div>
+        <div class="chart-wrap">
+          <div class="chart-header">
+            <span class="title">TPS Over Time</span>
+            <select id="tpsModelSelect" onchange="loadTPSChart()">
+              <option value="">All</option>
+            </select>
+            <span class="spacer"></span>
+            <span class="info" id="tpsRange"></span>
+          </div>
+          <canvas id="tpsChart" width="760" height="160" style="width:100%;height:140px"></canvas>
+        </div>
+        <div id="sideReports" style="max-height:180px;overflow-y:auto"></div>
+      </div>
+
+      <div class="card full">
         <div class="tabs">
           <button class="tab-btn active" data-tab="jobs">Recent Jobs</button>
           <button class="tab-btn" data-tab="resources">Resources</button>
@@ -195,22 +212,6 @@ select:focus{border-color:#58a6ff}
     <div class="card" style="flex-shrink:0">
       <h2>Mesh Topology <span class="count" id="meshNodeCount">1</span> node(s)</h2>
       <div class="mesh-topo" id="meshTopo"><svg id="meshSvg"></svg></div>
-    </div>
-    <div class="card">
-      <h2>Token Usage</h2>
-      <div class="sidebar-stat" id="sideUsage"></div>
-      <div class="chart-wrap">
-        <div class="chart-header">
-          <span class="title">TPS Over Time</span>
-          <select id="tpsModelSelect" onchange="loadTPSChart()">
-            <option value="">All</option>
-          </select>
-          <span class="spacer"></span>
-          <span class="info" id="tpsRange"></span>
-        </div>
-        <canvas id="tpsChart" width="760" height="160" style="width:100%;height:140px"></canvas>
-      </div>
-      <div id="sideReports" style="max-height:180px;overflow-y:auto"></div>
     </div>
     <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
       <div class="log-header">
@@ -439,6 +440,9 @@ function renderSideReports(data){
   var totalJobs=summary.total_jobs||0;
   var avgTPS=summary.avg_tokens_per_second||0;
   var avgDur=summary.avg_duration_seconds||0;
+
+  var compactEl=document.getElementById('sideUsageCompact');
+  if(compactEl)compactEl.textContent=fmtNum(totalTokens)+' tokens · '+fmtTPS(avgTPS)+' tok/s';
 
   document.getElementById('sideUsage').innerHTML=
     '<div class="sbox cyan"><div class="num">'+fmtNum(totalTokens)+'</div><div class="lbl">Tokens</div></div>'+
