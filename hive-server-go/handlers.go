@@ -216,6 +216,8 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/models", hs.handleModels)
 	mux.HandleFunc("/api/logs", hs.handleLogs)
 	mux.HandleFunc("POST /api/logs/clear", hs.handleLogsClear)
+	mux.HandleFunc("/api/reports/usage", hs.handleUsageReport)
+	mux.HandleFunc("/api/reports/usage/recent", hs.handleUsageRecent)
 }
 
 func (hs *HiveServer) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -570,6 +572,17 @@ func (hs *HiveServer) handleLogsClear(w http.ResponseWriter, r *http.Request) {
 	}
 	clearLogs()
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (hs *HiveServer) handleUsageReport(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, defaultTracker.GetSummary())
+}
+
+func (hs *HiveServer) handleUsageRecent(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	writeJSON(w, map[string]interface{}{
+		"records": defaultTracker.GetRecentUsage(limit),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, data interface{}) {

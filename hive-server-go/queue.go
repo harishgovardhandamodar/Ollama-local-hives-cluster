@@ -178,6 +178,9 @@ func (q *OllamaQueue) executeJob(job *Job) {
 	} else {
 		job.Status = JobCompleted
 		job.Result = result
+		if rec := recordFromResult(job, result); rec != nil {
+			defaultTracker.Record(*rec)
+		}
 		logInfo("Job %s completed: type=%s", job.ID, job.JobType)
 	}
 }

@@ -95,6 +95,8 @@ tr:hover td{background:#1c2129}
 .provider-url{font-size:9px;color:#6e7681;font-family:monospace}
 .model-count{font-size:10px;color:#8b949e}
 .resource-model-count{font-size:12px;color:#58a6ff;margin-left:8px}
+.stat-box.cyan .num{color:#39d2c0}
+.token-num{font-size:13px;font-weight:700;color:#e1e4e8;font-family:monospace}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 </style>
 </head>
@@ -147,6 +149,7 @@ tr:hover td{background:#1c2129}
     <div class="tabs">
       <button class="tab-btn active" data-tab="jobs">Recent Jobs</button>
       <button class="tab-btn" data-tab="resources">Resources</button>
+      <button class="tab-btn" data-tab="reports">Reports</button>
       <button class="tab-btn" data-tab="logs">Live Logs</button>
     </div>
     <div class="tab-content active" id="tab-jobs">
@@ -154,6 +157,10 @@ tr:hover td{background:#1c2129}
     </div>
     <div class="tab-content" id="tab-resources">
       <div id="resourcesContent" style="max-height:350px;overflow-y:auto"></div>
+    </div>
+    <div class="tab-content" id="tab-reports">
+      <div id="reportsSummary" style="padding:12px"></div>
+      <div id="reportsTable" style="max-height:300px;overflow-y:auto"></div>
     </div>
     <div class="tab-content" id="tab-logs">
       <div class="log-header">
@@ -361,6 +368,57 @@ function renderResources(nodes,providerTypes,models){
   el.innerHTML=html;
 }
 
+async function loadReports(){
+  try{
+    var r=await fetch('/api/reports/usage').then(function(r){return r.json()});
+    renderReports(r);
+  }catch(e){}
+}
+
+function fmtNum(n){if(n>=1e6)return (n/1e6).toFixed(1)+'M';if(n>=1e3)return (n/1e3).toFixed(1)+'K';return String(n);}
+function fmtDur(s){if(!s||s===0)return '—';if(s<1)return (s*1000).toFixed(0)+'ms';if(s<60)return s.toFixed(1)+'s';return Math.round(s/60)+'m '+Math.round(s%60)+'s';}
+function fmtTPS(n){if(!n||n===0)return '—';return n.toFixed(1);}
+
+function renderReports(data){
+  var summary=data||{};
+  var reports=summary.by_provider_model||[];
+
+  var totalTokens=summary.total_tokens||0;
+  var totalJobs=summary.total_jobs||0;
+  var totalPrompts=summary.total_prompts||0;
+  var totalCompletions=summary.total_completions||0;
+  var avgTPS=summary.avg_tokens_per_second||0;
+  var avgDur=summary.avg_duration_seconds||0;
+
+  document.getElementById('reportsSummary').innerHTML='<div class="stat-row">'+
+    '<div class="stat-box cyan"><div class="num">'+fmtNum(totalTokens)+'</div><div class="lbl">Total Tokens</div></div>'+
+    '<div class="stat-box blue"><div class="num">'+fmtNum(totalPrompts)+'</div><div class="lbl">Prompt Tokens</div></div>'+
+    '<div class="stat-box green"><div class="num">'+fmtNum(totalCompletions)+'</div><div class="lbl">Completion Tokens</div></div>'+
+    '<div class="stat-box purple"><div class="num">'+totalJobs+'</div><div class="lbl">Jobs</div></div>'+
+    '<div class="stat-box orange"><div class="num">'+fmtTPS(avgTPS)+'</div><div class="lbl">Avg Tok/s</div></div>'+
+    '<div class="stat-box red"><div class="num">'+fmtDur(avgDur)+'</div><div class="lbl">Avg Latency</div></div>'+
+    '</div>';
+
+  if(!reports.length){
+    document.getElementById('reportsTable').innerHTML='<div class="empty">No token usage data yet. Submit inference jobs to see reports.</div>';
+    return;
+  }
+
+  var html='<table><tr><th>Provider</th><th>Model</th><th>Prompt</th><th>Completion</th><th>Total</th><th>Avg Tok/s</th><th>Avg Latency</th><th>Jobs</th></tr>';
+  reports.forEach(function(r){
+    html+='<tr><td><span class="provider-badge '+r.provider+'">'+esc(r.provider)+'</span></td>'+
+      '<td style="font-size:11px;font-family:monospace">'+esc(r.model)+'</td>'+
+      '<td class="token-num">'+fmtNum(r.total_prompts)+'</td>'+
+      '<td class="token-num">'+fmtNum(r.total_completions)+'</td>'+
+      '<td class="token-num">'+fmtNum(r.total_tokens)+'</td>'+
+      '<td class="token-num" style="color:#f0883e">'+fmtTPS(r.avg_tokens_per_second)+'</td>'+
+      '<td class="token-num" style="color:#f85149">'+fmtDur(r.avg_duration_seconds)+'</td>'+
+      '<td>'+r.job_count+'</td></tr>';
+  });
+  html+='</table>';
+  document.getElementById('reportsTable').innerHTML=html;
+}
+
 function initTabs(){
   document.querySelectorAll('.tab-btn').forEach(function(btn){
     btn.addEventListener('click',function(){
@@ -371,6 +429,7 @@ function initTabs(){
       document.getElementById('tab-'+tabId).classList.add('active');
       if(tabId==='jobs')loadJobs();
       if(tabId==='resources')loadResources();
+      if(tabId==='reports')loadReports();
     });
   });
 }
