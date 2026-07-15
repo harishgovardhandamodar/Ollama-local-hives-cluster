@@ -316,7 +316,22 @@ func (q *OllamaQueue) callOllamaGeneric(payload map[string]interface{}, jobType 
 	}
 	respMap, ok := resp.(map[string]interface{})
 	if ok {
-		return extractJSONFromResponse(respMap), nil
+		extracted := extractJSONFromResponse(respMap)
+
+		if ec, ok := respMap["eval_count"].(float64); ok {
+			extracted["eval_count"] = ec
+		}
+		if pd, ok := respMap["prompt_eval_count"].(float64); ok {
+			extracted["prompt_eval_count"] = pd
+		}
+		if ed, ok := respMap["eval_duration"].(float64); ok {
+			extracted["eval_duration"] = ed
+		}
+		if m, ok := respMap["model"].(string); ok {
+			extracted["model"] = m
+		}
+
+		return extracted, nil
 	}
 	return resp, nil
 }
