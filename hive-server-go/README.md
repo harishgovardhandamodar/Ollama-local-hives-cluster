@@ -9,7 +9,10 @@ A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and 
 go build -o hive-server-go ./hive-server-go/
 OLLAMA_BASE_URL=http://localhost:11434 ./hive-server-go
 
-# Docker
+# Docker (build from repo root — context must be ., not hive-server-go/)
+docker build -t hive-server-go -f hive-server-go/Dockerfile .
+
+# Docker (run)
 docker run -d --name hive-server -p 8081:8081 \
   -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
   hive-server-go:latest
@@ -19,6 +22,8 @@ docker run -d --name hive-server --gpus all --network host \
   -e OLLAMA_BASE_URL=http://localhost:11434 \
   hive-server-go:latest
 ```
+
+> **Note:** The Dockerfile expects the **repo root** as build context (it references `go.mod` and `hive-server-go/` subpaths). Right-clicking the Dockerfile in VS Code and choosing **Build Image** uses the Dockerfile's own directory as context, causing a `not found` error. From VS Code, use **Ctrl+Shift+P → Run Task → Build hive-server-go** (requires the `.vscode/tasks.json` included in this repo) or build from the terminal as shown above.
 
 Open http://localhost:8081 for the dashboard.
 

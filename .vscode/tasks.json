@@ -1,0 +1,14 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build hive-server-go",
+      "type": "docker-build",
+      "dockerBuild": {
+        "dockerFile": "${workspaceFolder}/hive-server-go/Dockerfile",
+        "context": "${workspaceFolder}",
+        "tags": ["hive-server-go:latest"]
+      }
+    }
+  ]
+}
