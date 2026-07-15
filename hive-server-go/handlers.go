@@ -221,6 +221,7 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/logs/clear", hs.handleLogsClear)
 	mux.HandleFunc("/api/reports/usage", hs.handleUsageReport)
 	mux.HandleFunc("/api/reports/usage/recent", hs.handleUsageRecent)
+	mux.HandleFunc("/api/reports/usage/timeseries", hs.handleUsageTimeSeries)
 }
 
 func (hs *HiveServer) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -629,6 +630,33 @@ func (hs *HiveServer) handleLogsClear(w http.ResponseWriter, r *http.Request) {
 	}
 	clearLogs()
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (hs *HiveServer) handleUsageTimeSeries(w http.ResponseWriter, r *http.Request) {
+	if defaultDB == nil {
+		writeJSON(w, map[string]interface{}{"points": []interface{}{}})
+		return
+	}
+	model := r.URL.Query().Get("model")
+	sinceStr := r.URL.Query().Get("since")
+	since := now() - 3600
+	if sinceStr != "" {
+		var s float64
+		fmt.Sscanf(sinceStr, "%f", &s)
+		if s > 0 {
+			since = s
+		}
+	}
+	points, err := defaultDB.GetTimeSeries(model, since)
+	if err != nil {
+		writeJSON(w, map[string]interface{}{"error": err.Error()})
+		return
+	}
+	models, _ := defaultDB.GetModels()
+	writeJSON(w, map[string]interface{}{
+		"points": points,
+		"models": models,
+	})
 }
 
 func (hs *HiveServer) handleUsageReport(w http.ResponseWriter, r *http.Request) {

@@ -455,7 +455,7 @@ func (q *OllamaQueue) GetAllJobs() []map[string]interface{} {
 }
 
 func jobToMap(j *Job) map[string]interface{} {
-	return map[string]interface{}{
+	m := map[string]interface{}{
 		"job_id":         j.ID,
 		"client_id":      j.ClientID,
 		"job_type":       j.JobType,
@@ -468,6 +468,33 @@ func jobToMap(j *Job) map[string]interface{} {
 		"completed_at":   j.CompletedAt,
 		"queue_position": j.QueuePosition,
 	}
+
+	if resultMap, ok := j.Result.(map[string]interface{}); ok {
+		if pc, ok := resultMap["prompt_eval_count"].(float64); ok {
+			m["prompt_tokens"] = int(pc)
+		}
+		if ec, ok := resultMap["eval_count"].(float64); ok {
+			m["completion_tokens"] = int(ec)
+		}
+		if mt, ok := resultMap["model"].(string); ok {
+			m["model"] = mt
+		}
+		pt, _ := m["prompt_tokens"].(int)
+		ct, _ := m["completion_tokens"].(int)
+		if pt > 0 || ct > 0 {
+			m["total_tokens"] = pt + ct
+		}
+		if j.StartedAt != nil && j.CompletedAt != nil {
+			dur := *j.CompletedAt - *j.StartedAt
+			m["duration_seconds"] = dur
+			total := pt + ct
+			if dur > 0 && total > 0 {
+				m["tokens_per_second"] = float64(total) / dur
+			}
+		}
+	}
+
+	return m
 }
 
 func (q *OllamaQueue) CleanupOldJobs(maxAgeHours int) {

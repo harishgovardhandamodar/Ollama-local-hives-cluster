@@ -196,6 +196,57 @@ func (s *DBStore) GetRecent(limit int) ([]TokenRecord, error) {
 	return records, rows.Err()
 }
 
+type TimeSeriesPoint struct {
+	Timestamp float64 `json:"timestamp"`
+	TPS       float64 `json:"tps"`
+	Model     string  `json:"model"`
+}
+
+func (s *DBStore) GetTimeSeries(model string, since float64) ([]TimeSeriesPoint, error) {
+	query := `SELECT created_at, tokens_per_second, model FROM token_usage WHERE created_at >= ?`
+	args := []interface{}{since}
+	if model != "" {
+		query += ` AND model = ?`
+		args = append(args, model)
+	}
+	query += ` ORDER BY created_at ASC`
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query timeseries: %w", err)
+	}
+	defer rows.Close()
+
+	var points []TimeSeriesPoint
+	for rows.Next() {
+		var p TimeSeriesPoint
+		if err := rows.Scan(&p.Timestamp, &p.TPS, &p.Model); err != nil {
+			continue
+		}
+		points = append(points, p)
+	}
+	return points, rows.Err()
+}
+
+func (s *DBStore) GetModels() ([]string, error) {
+	rows, err := s.db.QueryContext(context.Background(),
+		`SELECT DISTINCT model FROM token_usage ORDER BY model`)
+	if err != nil {
+		return nil, fmt.Errorf("query models: %w", err)
+	}
+	defer rows.Close()
+
+	var models []string
+	for rows.Next() {
+		var m string
+		if err := rows.Scan(&m); err != nil {
+			continue
+		}
+		models = append(models, m)
+	}
+	return models, rows.Err()
+}
+
 func (s *DBStore) Prune(maxAge float64) error {
 	cutoff := now() - maxAge
 	_, err := s.db.ExecContext(context.Background(), "DELETE FROM token_usage WHERE created_at < ?", cutoff)

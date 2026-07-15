@@ -44,6 +44,8 @@ Open http://localhost:8081 for the dashboard.
 | `MESH_SEED_PEERS` | — | Comma-separated seed peer addresses |
 | `SERVER_ID` | `hostname` | Unique server identifier |
 | `CUSTOM_PROVIDER_URLS` | — | Comma-separated OpenAI-compatible API URLs |
+| `HIVE_DB_PATH` | `./hive-server.db` | Path to SQLite token usage database (persist with `-v ./hive-data:/app`) |
+| `SERVING_TYPE` | auto | Override serving type: `GPU`, `CPU`, `MLX` |
 
 ## API Reference
 

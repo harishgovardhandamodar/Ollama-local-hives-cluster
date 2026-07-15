@@ -29,7 +29,7 @@ var (
 func initDB() {
 	path := os.Getenv("HIVE_DB_PATH")
 	if path == "" {
-		path = "/app/hive-server.db"
+		path = "./hive-server.db"
 	}
 
 	db, err := NewDBStore(path)
