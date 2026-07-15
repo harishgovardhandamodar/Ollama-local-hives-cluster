@@ -12,7 +12,7 @@ import (
 )
 
 var (
-	serverVersion = "1.1.0"
+	serverVersion = "1.2.0"
 	startTime     = time.Now()
 )
 

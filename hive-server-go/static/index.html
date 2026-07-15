@@ -70,6 +70,9 @@ tr:hover td{background:#1c2129}
 .log-line .lvl.WARN{color:#f0883e}
 .log-line .lvl.ERROR{color:#f85149}
 .log-line .msg{color:#c9d1d9;word-break:break-all;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.log-filter{font-size:9px;padding:1px 8px;border-radius:8px;cursor:pointer;color:#6e7681;border:1px solid transparent;transition:all .15s}
+.log-filter:hover{color:#e1e4e8;border-color:#30363d}
+.log-filter.active{color:#58a6ff;border-color:#58a6ff;background:rgba(88,166,255,.1)}
 .tabs{display:flex;gap:0;background:#1c2129;border-bottom:1px solid #30363d;flex-wrap:wrap;border-radius:10px 10px 0 0}
 .tab-btn{background:none;border:none;padding:8px 14px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;color:#8b949e;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
 .tab-btn:hover{color:#e1e4e8;background:#21262d}
@@ -134,7 +137,7 @@ select:focus{border-color:#58a6ff}
 <div class="header">
   <div class="status-dot ok" id="ollamaDot"></div>
   <h1>Hive Server Go</h1>
-  <span class="badge" id="versionBadge">v1.1.0</span>
+  <span class="badge" id="versionBadge">v1.2.0</span>
   <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
   <div class="meta">
     <span id="serverId"></span>
@@ -213,6 +216,12 @@ select:focus{border-color:#58a6ff}
     <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0">
       <div class="log-header">
         <span style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#8b949e;font-weight:600">Live Logs</span>
+        <span style="display:flex;gap:3px;margin-left:8px" id="logFilters">
+          <span class="log-filter active" data-level="" onclick="setLogFilter('')">All</span>
+          <span class="log-filter" data-level="INFO" onclick="setLogFilter('INFO')">INFO</span>
+          <span class="log-filter" data-level="WARN" onclick="setLogFilter('WARN')">WARN</span>
+          <span class="log-filter" data-level="ERROR" onclick="setLogFilter('ERROR')">ERROR</span>
+        </span>
         <span class="spacer"></span>
         <span style="font-size:9px;color:#6e7681" id="logCount">0</span>
         <button onclick="clearLogs()">Clear</button>
@@ -224,7 +233,7 @@ select:focus{border-color:#58a6ff}
 
 <script>
 var TYPE_LABELS={generate:'Generate',chat:'Chat',embed:'Embed',list_models:'List Models',pull_model:'Pull Model',custom_prompt:'Custom Prompt'};
-var lastLogTime=0,_statusData={},_peersData=[],logPolling=false;
+var lastLogTime=0,_statusData={},_peersData=[],logPolling=false,logFilter='';
 
 async function refresh(){
   try{
@@ -559,6 +568,18 @@ function initTabs(){
 function fmtDuration(s){s=Math.abs(s);if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m '+Math.round(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}
 function fmtTime(epoch){var d=new Date(epoch*1000);return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function setLogFilter(level){
+  logFilter=level;
+  document.querySelectorAll('.log-filter').forEach(function(el){
+    el.classList.toggle('active',el.dataset.level===level);
+  });
+  var panel=document.getElementById('logPanel');
+  var all=panel._allLogs||[];
+  panel.innerHTML='';
+  all.forEach(function(l){if(!logFilter||l.level===logFilter)panel.appendChild(l);});
+  document.getElementById('logCount').textContent=panel.children.length;
+}
+
 function cleanLogLine(line){
   var idx=line.indexOf('] ');
   if(idx>0)return line.substring(idx+2);
@@ -574,13 +595,18 @@ async function pollLogs(){
       if(logs.length){
         lastLogTime=logs[logs.length-1].epoch||Date.now()/1000;
         var panel=document.getElementById('logPanel');
+        if(!panel._allLogs)panel._allLogs=[];
         logs.forEach(function(l){
           var d=document.createElement('div');d.className='log-line';
           d.innerHTML='<span class="ts">'+fmtTime(l.epoch)+'</span><span class="lvl '+l.level+'">'+l.level+'</span><span class="msg">'+esc(cleanLogLine(l.message)).split('\n')[0]+'</span>';
-          panel.appendChild(d);
+          panel._allLogs.push(d);
+          if(!logFilter||l.level===logFilter)panel.appendChild(d);
         });
         panel.scrollTop=panel.scrollHeight;
-        if(panel.children.length>300)while(panel.children.length>250)panel.removeChild(panel.firstChild);
+        if(panel._allLogs.length>500){
+          var remove=panel._allLogs.splice(0,panel._allLogs.length-400);
+          remove.forEach(function(el){if(el.parentNode)el.remove();});
+        }
         document.getElementById('logCount').textContent=panel.children.length;
       }
     }catch(e){}
@@ -590,7 +616,9 @@ async function pollLogs(){
 
 async function clearLogs(){
   await fetch('/api/logs/clear',{method:'POST'});
-  document.getElementById('logPanel').innerHTML='';
+  var panel=document.getElementById('logPanel');
+  panel.innerHTML='';
+  panel._allLogs=[];
   document.getElementById('logCount').textContent='0';
   lastLogTime=0;
 }
