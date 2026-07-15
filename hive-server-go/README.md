@@ -1,6 +1,6 @@
 # Hive Server Go
 
-A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features concurrent job queuing, peer mesh discovery, GPU-aware hardware metrics, and a live dashboard.
+A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features concurrent job queuing, peer mesh discovery, GPU-aware hardware metrics, SQLite-backed token usage reporting, and a live dashboard.
 
 ## Quick Start
 
@@ -9,24 +9,24 @@ A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and 
 go build -o hive-server-go ./hive-server-go/
 OLLAMA_BASE_URL=http://localhost:11434 ./hive-server-go
 
-# Docker (build from repo root — context must be ., not hive-server-go/)
-docker build -t hive-server-go -f hive-server-go/Dockerfile .
-
-# Wrong build command that causes missing-path errors:
-# docker build -t hive-server-go -f hive-server-go/Dockerfile hive-server-go
-
-# Docker (run)
+# Docker (database lives in container — data lost on recreate)
 docker run -d --name hive-server -p 8081:8081 \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+  hive-server-go:latest
+
+# Docker with persistent SQLite database
+docker run -d --name hive-server \
+  -p 8081:8081 \
+  -v hive-data:/data \
   -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
   hive-server-go:latest
 
 # Docker with Nvidia GPU (Linux)
 docker run -d --name hive-server --gpus all --network host \
   -e OLLAMA_BASE_URL=http://localhost:11434 \
+  -v hive-data:/data \
   hive-server-go:latest
 ```
-
-> **Note:** The Dockerfile expects the **repo root** as build context (it references `go.mod` and `hive-server-go/` subpaths). Right-clicking the Dockerfile in VS Code and choosing **Build Image** uses the Dockerfile's own directory as context, causing a `not found` error. From VS Code, use **Ctrl+Shift+P → Run Task → Build hive-server-go** (requires the `.vscode/tasks.json` included in this repo) or build from the terminal as shown above.
 
 Open http://localhost:8081 for the dashboard.
 
@@ -44,8 +44,7 @@ Open http://localhost:8081 for the dashboard.
 | `MESH_SEED_PEERS` | — | Comma-separated seed peer addresses |
 | `SERVER_ID` | `hostname` | Unique server identifier |
 | `CUSTOM_PROVIDER_URLS` | — | Comma-separated OpenAI-compatible API URLs |
-| `HIVE_DB_PATH` | `./hive-server.db` | Path to SQLite token usage database (persist with `-v ./hive-data:/app`) |
-| `SERVING_TYPE` | auto | Override serving type: `GPU`, `CPU`, `MLX` |
+| `HIVE_DB_PATH` | `/data/hive-server.db` | SQLite database path (persist with `-v volume:/data`) |
 
 ## API Reference
 
@@ -167,10 +166,23 @@ Unknown job types are forwarded as generic prompts to Ollama, with the job type 
 
 **`GET /api/models`** — Aggregated model list across all nodes and providers (deduplicated).
 
+### Usage Reports
+
+**`GET /api/reports/usage`** — Aggregated token usage by provider/model/node.
+
+**`GET /api/reports/usage/recent`** — Recent 100 token usage records.
+
+**`GET /api/reports/usage/timeseries?model=&since=`** — TPS time-series points for line chart.
+
+**`GET /api/reports/usage/histogram?model=&since=&bins=25`** — Binned TPS distribution from SQLite.
+
 ### Mesh
 
 **`GET /api/peers`** — Discovered mesh peers with load and capacity info.
 **`POST /api/peers/register`** — Manually register a mesh peer.
+**`POST /api/peers/introduce`** — Allow a remote peer to register itself.
+**`POST /api/peers/scan`** — Re-probe seed peers.
+**`GET /api/peers/diagnostics`** — Mesh configuration and status.
 
 ### Observability
 
@@ -179,7 +191,26 @@ Unknown job types are forwarded as generic prompts to Ollama, with the job type 
 
 ### Dashboard
 
-**`GET /`** — Live dashboard HTML with stats, mesh topology, clients, queue, resources, and live logs.
+**`GET /`** — Live dashboard HTML with stats, mesh topology, clients, queue, token usage, and live logs.
+
+## Data Persistence
+
+Token usage metrics are stored in a SQLite database. By default the database lives at `/data/hive-server.db` inside the container. To persist data across container restarts, mount a volume:
+
+```sh
+docker run -d --name hive-server \
+  -v hive-data:/data \
+  ... hive-server-go:latest
+```
+
+To use a custom path, set `HIVE_DB_PATH`:
+
+```sh
+docker run -d --name hive-server \
+  -v ./db:/app/db \
+  -e HIVE_DB_PATH=/app/db/metrics.db \
+  ... hive-server-go:latest
+```
 
 ## Architecture
 
@@ -197,17 +228,22 @@ Unknown job types are forwarded as generic prompts to Ollama, with the job type 
 │  ┌────▼───────────────────────────────────────┐    │
 │  │           HTTP API (port 8081)              │    │
 │  │  /api/jobs  /api/clients  /api/nodes       │    │
-│  │  /api/peers /api/logs    /api/ollama/health│    │
+│  │  /api/peers /api/logs    /api/reports/usage│    │
+│  └────────────────────────────────────────────┘    │
+│       │                                            │
+│  ┌────▼───────────────────────────────────────┐    │
+│  │  SQLite (token_usage table)                │    │
+│  │  /data/hive-server.db                      │    │
 │  └────────────────────────────────────────────┘    │
 └──────────────────────────────────────────────────┘
 ```
 
 ## Dashboard
 
-The dashboard (served at `/`) has four tabs:
-- **Recent Jobs** — live job queue with status, type, duration
-- **Resources** — all nodes, their providers, and available models
-- **Live Logs** — real-time server logs with 1s polling and clear
+The dashboard (served at `/`) has:
+- **Stats bar** — workers, queued, running, completed, clients, peers
+- **Main grid** — Connected Clients, Job Queue, Mesh Peers, Ollama Health, **Token Usage** (stats + TPS chart with Line/Hist views + time range buttons + per-model reports)
+- **Sidebar** — Mesh Topology, **Live Logs** (with INFO/WARN/ERROR filter)
 
 ## Developer Notes
 
@@ -238,16 +274,17 @@ The `hive-server-go/` package is part of the `github.com/hive-cluster/hive-servi
 - Beacons contain: `server_id`, `port`, `max_concurrent`, `pending_jobs`, `running_jobs`, `clients`
 - Peers are considered stale after 30s of no beacon
 - Seed peers are probed via HTTP `/api/status` every 30s
+- On seed probe, the server also introduces itself to the peer via `POST /api/peers/introduce`
 - Job forwarding: when local capacity is exhausted, the server selects the best peer (lowest load) and forwards via `POST /api/jobs/forward`
 
 ### Job Queue
 
 - Goroutine-based worker pool with `sync.Cond` for dispatch
 - Workers are bounded by `MAX_CONCURRENT`
-- Completed jobs are retained for 1 hour
+- Completed jobs are retained for 1 hour in memory
+- Token metrics are extracted from Ollama responses and stored in SQLite
 - Unknown job types fall back to a generic Ollama prompt with the payload as context
-- JSON extraction from Ollama responses supports code-fenced and plain JSON
 
 ### Extending the Dashboard
 
-Edit `static/index.html` to add views, tabs, or visualizations. Rebuild the binary — the HTML is embedded at compile time. To develop with hot reload, serve the HTML file separately and point the Go server at it with a reverse proxy.
+Edit `static/index.html` to add views, tabs, or visualizations. Rebuild the binary — the HTML is embedded at compile time.

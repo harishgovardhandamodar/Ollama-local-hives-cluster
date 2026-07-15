@@ -18,7 +18,7 @@ func NewDBStore(path string) (*DBStore, error) {
 		path = os.Getenv("HIVE_DB_PATH")
 	}
 	if path == "" {
-		path = "/app/hive-server.db"
+		path = "/data/hive-server.db"
 	}
 
 	db, err := sql.Open("sqlite", path)

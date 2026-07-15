@@ -23,6 +23,8 @@ FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates
 
+RUN mkdir -p /data
+
 COPY --from=builder /build/hive-server-go/hive-server-go /app/hive-server-go
 COPY hive-server-go/static/index.html /app/static/index.html
 
