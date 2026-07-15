@@ -137,7 +137,7 @@ select:focus{border-color:#58a6ff}
 <div class="header">
   <div class="status-dot ok" id="ollamaDot"></div>
   <h1>Hive Server Go</h1>
-  <span class="badge" id="versionBadge">v1.2.0</span>
+  <span class="badge" id="versionBadge">v1.2.1</span>
   <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
   <div class="meta">
     <span id="serverId"></span>
@@ -152,11 +152,6 @@ select:focus{border-color:#58a6ff}
     <div class="main-grid">
       <div class="card full">
         <div class="stat-row" id="stats"></div>
-      </div>
-
-      <div class="card full">
-        <h2>Mesh Topology <span class="count" id="meshNodeCount">1</span> node(s)</h2>
-        <div class="mesh-topo" id="meshTopo"><svg id="meshSvg"></svg></div>
       </div>
 
       <div class="card">
@@ -197,6 +192,10 @@ select:focus{border-color:#58a6ff}
 
   <div class="divider" id="divider"></div>
   <div class="sidebar">
+    <div class="card" style="flex-shrink:0">
+      <h2>Mesh Topology <span class="count" id="meshNodeCount">1</span> node(s)</h2>
+      <div class="mesh-topo" id="meshTopo"><svg id="meshSvg"></svg></div>
+    </div>
     <div class="card">
       <h2>Token Usage</h2>
       <div class="sidebar-stat" id="sideUsage"></div>
