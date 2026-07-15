@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hive Server Go – Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f1117;color:#e1e4e8;min-height:100vh}
+.header{background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.header h1{font-size:18px;font-weight:600}
+.header .badge{font-size:10px;padding:2px 8px;border-radius:10px;background:#1f6feb;color:#fff;font-weight:600}
+.header .badge.mesh{background:#8957e5}
+.header .status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.header .status-dot.ok{background:#2ea043;box-shadow:0 0 6px rgba(46,160,67,.5)}
+.header .status-dot.err{background:#f85149;box-shadow:0 0 6px rgba(248,81,73,.5)}
+.header .meta{margin-left:auto;font-size:11px;color:#8b949e;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:20px 24px;max-width:1200px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;overflow:hidden}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.4px;color:#8b949e;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.card h2 .count{font-size:18px;font-weight:700;color:#e1e4e8}
+.full{grid-column:1/-1}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{text-align:left;padding:8px 10px;color:#8b949e;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.3px;border-bottom:1px solid #30363d}
+td{padding:8px 10px;border-bottom:1px solid #21262d;vertical-align:middle}
+tr:hover td{background:#1c2129}
+.dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:6px}
+.dot.connected{background:#2ea043}
+.dot.stale{background:#f0883e}
+.dot.disconnected{background:#f85149}
+.status-tag{font-size:9px;padding:2px 7px;border-radius:8px;font-weight:600;text-transform:uppercase;letter-spacing:.2px}
+.status-tag.pending{background:rgba(240,136,62,.15);color:#f0883e;border:1px solid rgba(240,136,62,.3)}
+.status-tag.running{background:rgba(88,166,255,.15);color:#58a6ff;border:1px solid rgba(88,166,255,.3)}
+.status-tag.completed{background:rgba(46,160,67,.15);color:#2ea043;border:1px solid rgba(46,160,67,.3)}
+.status-tag.failed{background:rgba(248,81,73,.15);color:#f85149;border:1px solid rgba(248,81,73,.3)}
+.status-tag.mesh{background:rgba(137,87,229,.15);color:#bc8cff;border:1px solid rgba(137,87,229,.3);margin-left:4px}
+.job-type{font-weight:600;color:#e1e4e8}
+.job-id{font-family:monospace;font-size:10px;color:#6e7681;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job-time{font-size:10px;color:#6e7681}
+.progress-wrap{display:flex;align-items:center;gap:10px;margin-top:8px}
+.progress-bar{flex:1;height:6px;background:#21262d;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;border-radius:3px;transition:width .3s}
+.progress-label{font-size:11px;color:#8b949e;white-space:nowrap}
+.stat-row{display:flex;gap:12px;flex-wrap:wrap}
+.stat-box{flex:1;min-width:100px;background:#0f1117;border:1px solid #30363d;border-radius:8px;padding:12px;text-align:center}
+.stat-box .num{font-size:28px;font-weight:700;line-height:1.2}
+.stat-box .lbl{font-size:10px;color:#8b949e;text-transform:uppercase;letter-spacing:.3px;margin-top:2px}
+.stat-box.blue .num{color:#58a6ff}
+.stat-box.green .num{color:#2ea043}
+.stat-box.orange .num{color:#f0883e}
+.stat-box.red .num{color:#f85149}
+.stat-box.purple .num{color:#bc8cff}
+.empty{text-align:center;padding:24px;color:#6e7681;font-size:12px}
+.log-panel{background:#0d1117;border:1px solid #21262d;border-radius:6px;max-height:300px;overflow-y:auto;font-family:monospace;font-size:11px;padding:4px 8px}
+.log-panel::-webkit-scrollbar{width:5px}
+.log-panel::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+.log-line{padding:2px 4px;border-bottom:1px solid #21262d;display:flex;gap:8px;line-height:1.5}
+.log-line .ts{color:#6e7681;flex-shrink:0}
+.log-line .lvl{flex-shrink:0;width:40px;font-weight:600}
+.log-line .lvl.INFO{color:#58a6ff}
+.log-line .lvl.WARN{color:#f0883e}
+.log-line .lvl.ERROR{color:#f85149}
+.log-line .msg{color:#c9d1d9;word-break:break-all}
+.tabs{display:flex;gap:0;background:#1c2129;border-bottom:1px solid #30363d;flex-wrap:wrap}
+.tab-btn{background:none;border:none;padding:10px 16px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;color:#8b949e;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
+.tab-btn:hover{color:#e1e4e8;background:#21262d}
+.tab-btn.active{color:#58a6ff;border-bottom-color:#58a6ff}
+.tab-content{display:none;padding:0}
+.tab-content.active{display:block}
+.log-header{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid #21262d;font-size:11px;color:#8b949e;flex-shrink:0}
+.log-header .spacer{flex:1}
+.log-header button{background:none;border:1px solid #30363d;color:#8b949e;font-size:10px;padding:1px 6px;border-radius:3px;cursor:pointer}
+.log-header button:hover{color:#e1e4e8}
+.mesh-topo{width:100%;height:260px;overflow:hidden;position:relative}
+.mesh-topo svg{width:100%;height:100%}
+.peer-load-bar{height:4px;background:#21262d;border-radius:2px;overflow:hidden;margin-top:4px;width:80px;display:inline-block;vertical-align:middle}
+.peer-load-fill{height:100%;border-radius:2px;transition:width .3s}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="status-dot ok" id="ollamaDot"></div>
+  <h1>Hive Server Go</h1>
+  <span class="badge" id="versionBadge">v1.0.0</span>
+  <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
+  <div class="meta">
+    <span id="serverId"></span>
+    <span id="ollamaInfo">Ollama: checking...</span>
+    <span id="modelInfo"></span>
+    <span id="lastRefresh"></span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card full">
+    <div class="stat-row" id="stats"></div>
+  </div>
+
+  <div class="card full">
+    <h2>Mesh Topology <span class="count" id="meshNodeCount">1</span> node(s)</h2>
+    <div class="mesh-topo" id="meshTopo"><svg id="meshSvg"></svg></div>
+  </div>
+
+  <div class="card">
+    <h2>Connected Clients <span class="count" id="nodeCount">0</span></h2>
+    <div id="nodesTable"></div>
+  </div>
+
+  <div class="card">
+    <h2>Job Queue <span class="count" id="queueCount">0</span></h2>
+    <div id="queueProgress"></div>
+    <div id="queueTable"></div>
+  </div>
+
+  <div class="card">
+    <h2>Mesh Peers <span class="count" id="peerCount">0</span></h2>
+    <div id="peersTable"></div>
+  </div>
+
+  <div class="card">
+    <h2>Ollama Health</h2>
+    <div id="ollamaHealth" style="font-size:12px;color:#8b949e">Checking...</div>
+  </div>
+
+  <div class="card full">
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="jobs">Recent Jobs</button>
+      <button class="tab-btn" data-tab="logs">Live Logs</button>
+    </div>
+    <div class="tab-content active" id="tab-jobs">
+      <div id="jobsTable" style="max-height:300px;overflow-y:auto"></div>
+    </div>
+    <div class="tab-content" id="tab-logs">
+      <div class="log-header">
+        <span>Server Logs</span>
+        <span class="spacer"></span>
+        <span id="logCount">0</span>
+        <button onclick="clearLogs()">Clear</button>
+      </div>
+      <div class="log-panel" id="logPanel"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var TYPE_LABELS={generate:'Generate',chat:'Chat',embed:'Embed',list_models:'List Models',pull_model:'Pull Model',custom_prompt:'Custom Prompt'};
+var lastLogTime=0,_statusData={},_peersData=[],logPolling=false;
+
+async function refresh(){
+  try{
+    var r=await Promise.all([
+      fetch('/api/status').then(function(r){return r.json()}),
+      fetch('/api/clients').then(function(r){return r.json()}),
+      fetch('/api/peers').then(function(r){return r.json()}).catch(function(){return {peers:[]}}),
+      fetch('/api/ollama/health').then(function(r){return r.json()}).catch(function(){return {status:'unreachable'}}),
+    ]);
+    _statusData=r[0];_peersData=r[2].peers||[];
+    renderStats(r[0]);renderNodes(r[1].clients||[]);
+    renderJobs(r[0].queue||{});renderPeers(_peersData);
+    renderMeshTopology(r[0],_peersData);renderOllamaHealth(r[3]);
+    document.getElementById('lastRefresh').textContent='Updated '+new Date().toLocaleTimeString();
+    loadJobs();
+  }catch(e){console.error('Refresh:',e);}
+}
+
+function renderStats(s){
+  var q=s.queue||{};
+  document.getElementById('stats').innerHTML='<div class="stat-box blue"><div class="num">'+(q.max_concurrent||0)+'</div><div class="lbl">Workers</div></div><div class="stat-box orange"><div class="num">'+(q.pending||0)+'</div><div class="lbl">Queued</div></div><div class="stat-box blue"><div class="num">'+(q.running||0)+'</div><div class="lbl">Running</div></div><div class="stat-box green"><div class="num">'+(q.completed_recent||0)+'</div><div class="lbl">Done (1h)</div></div><div class="stat-box"><div class="num">'+(s.clients||0)+'/'+(s.max_clients||0)+'</div><div class="lbl">Clients</div></div><div class="stat-box purple"><div class="num">'+(s.peers||0)+'</div><div class="lbl">Peers</div></div>';
+  document.getElementById('ollamaInfo').textContent='Ollama: '+(s.ollama_url||'');
+  document.getElementById('modelInfo').textContent=s.ollama_model||'';
+  document.getElementById('serverId').textContent=s.server_id||'';
+  document.getElementById('versionBadge').textContent='v'+(s.version||'1.0.0');
+  document.getElementById('ollamaDot').className='status-dot '+(s.queue?'ok':'err');
+  document.getElementById('meshBadge').style.display=s.mesh_enabled?'inline':'none';
+}
+
+function renderNodes(clients){
+  document.getElementById('nodeCount').textContent=clients.length;
+  if(!clients.length){document.getElementById('nodesTable').innerHTML='<div class="empty">No clients connected</div>';return;}
+  var html='<table><tr><th>Status</th><th>Client ID</th><th>Name</th><th>Jobs</th><th>Last Seen</th></tr>';
+  clients.forEach(function(c){
+    var age=Date.now()/1000-c.last_heartbeat;
+    var status=age<120?'connected':age<300?'stale':'disconnected';
+    html+='<tr><td><span class="dot '+status+'"></span>'+status+'</td><td style="font-family:monospace;font-size:11px">'+esc(c.client_id)+'</td><td>'+esc(c.name)+'</td><td>'+c.jobs_submitted+' sub / '+c.jobs_completed+' done</td><td class="job-time">'+fmtDuration(age)+' ago</td></tr>';
+  });
+  html+='</table>';
+  document.getElementById('nodesTable').innerHTML=html;
+}
+
+async function loadJobs(){
+  try{
+    var r=await fetch('/api/jobs').then(function(r){return r.json()});
+    renderJobTable(r.jobs||[]);
+  }catch(e){}
+}
+
+function renderJobs(q){
+  document.getElementById('queueCount').textContent=(q.pending||0)+(q.running||0);
+  var maxW=q.max_concurrent||2;
+  var pct=maxW?Math.round(((q.running||0)/maxW)*100):0;
+  var color=(q.running||0)>0?'#58a6ff':'#30363d';
+  document.getElementById('queueProgress').innerHTML='<div class="progress-wrap"><div class="progress-bar"><div class="progress-fill" style="width:'+pct+'%;background:'+color+'"></div></div><div class="progress-label">'+(q.running||0)+' / '+maxW+' workers</div></div>';
+}
+
+function renderJobTable(jobs){
+  if(!jobs||!jobs.length){document.getElementById('jobsTable').innerHTML='<div class="empty">No jobs</div>';return;}
+  var html='<table><tr><th>Status</th><th>Type</th><th>Client</th><th>Duration</th><th>ID</th></tr>';
+  jobs.slice(0,50).forEach(function(j){
+    var type=TYPE_LABELS[j.job_type]||j.job_type;
+    var dur=j.completed_at&&j.started_at?fmtDuration(j.completed_at-j.started_at):j.started_at?fmtDuration(Date.now()/1000-j.started_at)+'...':'—';
+    var isMesh=j.id&&j.id.startsWith('mesh:');
+    var route=isMesh?' <span class="status-tag mesh">mesh</span>':'';
+    html+='<tr><td><span class="status-tag '+j.status+'">'+j.status+'</span>'+route+'</td><td class="job-type">'+esc(type)+'</td><td class="job-time">'+esc(j.client_id||'')+'</td><td class="job-time">'+dur+'</td><td class="job-id" title="'+esc(j.id)+'">'+esc(j.id)+'</td></tr>';
+  });
+  html+='</table>';
+  document.getElementById('jobsTable').innerHTML=html;
+}
+
+function renderPeers(peers){
+  document.getElementById('peerCount').textContent=peers.length;
+  if(!peers.length){document.getElementById('peersTable').innerHTML='<div class="empty">No peers discovered</div>';return;}
+  var html='<table><tr><th>Status</th><th>Server</th><th>Model</th><th>Load</th><th>Queue</th><th>Capacity</th></tr>';
+  peers.forEach(function(p){
+    var status=p.alive?'connected':'stale';
+    var loadPct=Math.round(p.load*100);
+    var loadColor=loadPct<50?'#2ea043':loadPct<80?'#f0883e':'#f85149';
+    html+='<tr><td><span class="dot '+status+'"></span>'+status+'</td><td style="font-family:monospace;font-size:11px">'+esc(p.server_id)+'</td><td style="font-size:10px">'+esc(p.ollama_model)+'</td><td><span style="color:'+loadColor+'">'+loadPct+'%</span> <span class="peer-load-bar"><span class="peer-load-fill" style="width:'+loadPct+'%;background:'+loadColor+'"></span></span></td><td style="font-size:11px">'+p.running_jobs+' run / '+p.pending_jobs+' wait</td><td>'+p.available_capacity+'/'+p.max_concurrent+'</td></tr>';
+  });
+  html+='</table>';
+  document.getElementById('peersTable').innerHTML=html;
+}
+
+function renderMeshTopology(status,peers){
+  var svg=document.getElementById('meshSvg');
+  var container=document.getElementById('meshTopo');
+  if(!svg||!container)return;
+  var W=container.clientWidth||800,H=container.clientHeight||260;
+  svg.setAttribute('viewBox','0 0 '+W+' '+H);
+  var totalNodes=1+peers.length;
+  document.getElementById('meshNodeCount').textContent=totalNodes;
+  var cx=W/2,cy=H/2,selfR=Math.min(W,H)*0.06,peerR=selfR*0.8;
+  var html='';
+  if(!peers.length){
+    html+='<circle cx="'+cx+'" cy="'+cy+'" r="'+selfR+'" fill="#1f6feb" stroke="#58a6ff" stroke-width="2"/>';
+    html+='<text x="'+cx+'" y="'+(cy+3)+'" text-anchor="middle" fill="#8b949e" font-size="11">Standalone</text>';
+    html+='<text x="'+cx+'" y="'+(cy-selfR-10)+'" text-anchor="middle" font-size="10" fill="#e1e4e8">'+esc(status.server_id||'this')+'</text>';
+    svg.innerHTML=html;return;
+  }
+  var ringR=Math.min(W,H)*0.32;
+  peers.forEach(function(p,i){
+    var angle=(2*Math.PI*i/peers.length)-Math.PI/2;
+    var px=cx+ringR*Math.cos(angle),py=cy+ringR*Math.sin(angle);
+    var loadPct=p.load||0;
+    var rColor=loadPct<0.5?'#2ea043':loadPct<0.8?'#f0883e':'#f85149';
+    var isActive=p.running_jobs>0;
+    var cls=p.alive?'#8957e5':'#30363d';
+    var linkCls=isActive?'#58a6ff':'#30363d';
+    html+='<line x1="'+cx+'" y1="'+cy+'" x2="'+px+'" y2="'+py+'" stroke="'+linkCls+'" stroke-width="'+(isActive?2:1.5)+'" stroke-dasharray="'+(isActive?'none':'4 2')+'"/>';
+    html+='<circle cx="'+px+'" cy="'+py+'" r="'+peerR+'" fill="'+cls+'" stroke="#bc8cff" stroke-width="'+(p.alive?2:1)+'"/>';
+    var arc=loadPct*2*Math.PI*peerR;
+    html+='<circle cx="'+px+'" cy="'+py+'" r="'+(peerR+4)+'" fill="none" stroke="'+rColor+'" stroke-width="3" stroke-linecap="round" stroke-dasharray="'+arc+' '+(2*Math.PI*peerR)+'" transform="rotate(-90,'+px+','+py+')" style="opacity:0.7"/>';
+    html+='<text x="'+px+'" y="'+(py+3)+'" text-anchor="middle" font-size="9" fill="#e1e4e8">'+esc(p.server_id)+'</text>';
+    html+='<text x="'+px+'" y="'+(py+peerR+18)+'" text-anchor="middle" fill="#8b949e" font-size="9">'+Math.round(loadPct*100)+'% load</text>';
+    if(isActive) html+='<text x="'+px+'" y="'+(py-peerR-6)+'" text-anchor="middle" fill="#58a6ff" font-size="9">'+p.running_jobs+' active</text>';
+  });
+  html+='<circle cx="'+cx+'" cy="'+cy+'" r="'+selfR+'" fill="#1f6feb" stroke="#58a6ff" stroke-width="2" style="animation:pulse 3s ease-in-out infinite"/>';
+  html+='<text x="'+cx+'" y="'+(cy+3)+'" text-anchor="middle" font-size="10" fill="#e1e4e8">'+esc(status.server_id||'this')+'</text>';
+  html+='<text x="'+cx+'" y="'+(cy+selfR+16)+'" text-anchor="middle" fill="#58a6ff" font-size="9">'+(status.queue?status.queue.running||0:0)+' active</text>';
+  svg.innerHTML=html;
+}
+
+function renderOllamaHealth(h){
+  var el=document.getElementById('ollamaHealth');
+  if(h.status==='healthy'){
+    el.innerHTML='<span style="color:#2ea043">Healthy</span> - Models: '+esc((h.models||[]).join(', '));
+  }else{
+    el.innerHTML='<span style="color:#f85149">Unhealthy</span> - '+esc(h.error||'Unknown');
+  }
+}
+
+function initTabs(){
+  document.querySelectorAll('.tab-btn').forEach(function(btn){
+    btn.addEventListener('click',function(){
+      var tabId=btn.dataset.tab;
+      document.querySelectorAll('.tab-btn').forEach(function(b){b.classList.remove('active')});
+      document.querySelectorAll('.tab-content').forEach(function(c){c.classList.remove('active')});
+      btn.classList.add('active');
+      document.getElementById('tab-'+tabId).classList.add('active');
+      if(tabId==='jobs')loadJobs();
+    });
+  });
+}
+
+function fmtDuration(s){s=Math.abs(s);if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m '+Math.round(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+function cleanLogLine(line){
+  var idx=line.indexOf('] ');
+  if(idx>0)return line.substring(idx+2);
+  return line;
+}
+
+async function pollLogs(){
+  if(logPolling)return;logPolling=true;
+  while(true){
+    try{
+      var r=await fetch('/api/logs?since='+lastLogTime).then(function(r){return r.json()});
+      var logs=r.logs||[];
+      if(logs.length){
+        lastLogTime=logs[logs.length-1].epoch||Date.now()/1000;
+        var panel=document.getElementById('logPanel');
+        logs.forEach(function(l){
+          var d=document.createElement('div');d.className='log-line';
+          d.innerHTML='<span class="ts">'+esc(l.ts||'')+'</span><span class="lvl '+l.level+'">'+l.level+'</span><span class="msg">'+esc(cleanLogLine(l.message)).split('\n')[0]+'</span>';
+          panel.appendChild(d);
+        });
+        panel.scrollTop=panel.scrollHeight;
+        if(panel.children.length>300)while(panel.children.length>250)panel.removeChild(panel.firstChild);
+        document.getElementById('logCount').textContent=panel.children.length;
+      }
+    }catch(e){}
+    await new Promise(function(r){setTimeout(r,1000)});
+  }
+}
+
+async function clearLogs(){
+  await fetch('/api/logs/clear',{method:'POST'});
+  document.getElementById('logPanel').innerHTML='';
+  document.getElementById('logCount').textContent='0';
+  lastLogTime=0;
+}
+
+initTabs();
+refresh();
+setInterval(refresh,3000);
+setInterval(loadJobs,5000);
+pollLogs();
+</script>
+</body>
+</html>

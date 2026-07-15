@@ -46,9 +46,7 @@ func (h *Handlers) HandleAPIClusterStatus(w http.ResponseWriter, r *http.Request
 	usedSlots := 0
 	for _, n := range nodes {
 		totalSlots += n.Capacity
-		n.mu.RLock()
-		usedSlots += n.ActiveConns
-		n.mu.RUnlock()
+		usedSlots += n.GetActiveConns()
 	}
 
 	historyStats := h.history.Stats()
@@ -57,11 +55,9 @@ func (h *Handlers) HandleAPIClusterStatus(w http.ResponseWriter, r *http.Request
 
 	modelSet := make(map[string]bool)
 	for _, n := range healthy {
-		n.mu.RLock()
-		for _, m := range n.Models {
+		for _, m := range n.GetModels() {
 			modelSet[m] = true
 		}
-		n.mu.RUnlock()
 	}
 	models := make([]string, 0, len(modelSet))
 	for m := range modelSet {
@@ -132,11 +128,9 @@ func (h *Handlers) HandleAPIModels(w http.ResponseWriter, r *http.Request) {
 	healthy := h.cluster.GetHealthyNodes()
 	modelNodes := make(map[string][]string)
 	for _, n := range healthy {
-		n.mu.RLock()
-		for _, m := range n.Models {
+		for _, m := range n.GetModels() {
 			modelNodes[m] = append(modelNodes[m], n.Name)
 		}
-		n.mu.RUnlock()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(modelNodes)
@@ -162,9 +156,7 @@ func (h *Handlers) HandleSSE(w http.ResponseWriter, r *http.Request) {
 	usedSlots := 0
 	for _, n := range nodes {
 		totalSlots += n.Capacity
-		n.mu.RLock()
-		usedSlots += n.ActiveConns
-		n.mu.RUnlock()
+		usedSlots += n.GetActiveConns()
 	}
 
 	data := map[string]interface{}{
@@ -198,9 +190,7 @@ func (h *Handlers) HandleSSE(w http.ResponseWriter, r *http.Request) {
 			usedSlots := 0
 			for _, n := range nodes {
 				totalSlots += n.Capacity
-				n.mu.RLock()
-				usedSlots += n.ActiveConns
-				n.mu.RUnlock()
+				usedSlots += n.GetActiveConns()
 			}
 			data := map[string]interface{}{
 				"nodes":        nodes,
