@@ -73,6 +73,9 @@ tr:hover td{background:#1c2129}
 .log-filter{font-size:9px;padding:1px 8px;border-radius:8px;cursor:pointer;color:#6e7681;border:1px solid transparent;transition:all .15s}
 .log-filter:hover{color:#e1e4e8;border-color:#30363d}
 .log-filter.active{color:#58a6ff;border-color:#58a6ff;background:rgba(88,166,255,.1)}
+.chart-tab{font-size:9px;padding:1px 7px;border-radius:4px;cursor:pointer;color:#6e7681;border:1px solid transparent;transition:all .15s}
+.chart-tab:hover{color:#e1e4e8;border-color:#30363d}
+.chart-tab.active{color:#39d2c0;border-color:#39d2c0;background:rgba(57,210,192,.08)}
 .tabs{display:flex;gap:0;background:#1c2129;border-bottom:1px solid #30363d;flex-wrap:wrap;border-radius:10px 10px 0 0}
 .tab-btn{background:none;border:none;padding:8px 14px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;color:#8b949e;cursor:pointer;border-bottom:2px solid transparent;transition:all .2s}
 .tab-btn:hover{color:#e1e4e8;background:#21262d}
@@ -137,7 +140,7 @@ select:focus{border-color:#58a6ff}
 <div class="header">
   <div class="status-dot ok" id="ollamaDot"></div>
   <h1>Hive Server Go</h1>
-  <span class="badge" id="versionBadge">v1.2.1</span>
+  <span class="badge" id="versionBadge">v1.3.0</span>
   <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
   <div class="meta">
     <span id="serverId"></span>
@@ -180,12 +183,16 @@ select:focus{border-color:#58a6ff}
         <div class="sidebar-stat" id="sideUsage"></div>
         <div class="chart-wrap">
           <div class="chart-header">
-            <span class="title">TPS Over Time</span>
-            <select id="tpsModelSelect" onchange="loadTPSChart()">
-              <option value="">All</option>
-            </select>
-            <span class="spacer"></span>
-            <span class="info" id="tpsRange"></span>
+          <span class="title">TPS</span>
+          <span style="display:flex;gap:2px;margin-left:6px">
+            <span class="chart-tab active" data-chart="line" onclick="setChartType('line')">Line</span>
+            <span class="chart-tab" data-chart="hist" onclick="setChartType('hist')">Hist</span>
+          </span>
+          <select id="tpsModelSelect" onchange="loadTPSChart()">
+            <option value="">All</option>
+          </select>
+          <span class="spacer"></span>
+          <span class="info" id="tpsRange"></span>
           </div>
           <canvas id="tpsChart" width="760" height="160" style="width:100%;height:140px"></canvas>
         </div>
@@ -233,7 +240,7 @@ select:focus{border-color:#58a6ff}
 
 <script>
 var TYPE_LABELS={generate:'Generate',chat:'Chat',embed:'Embed',list_models:'List Models',pull_model:'Pull Model',custom_prompt:'Custom Prompt'};
-var lastLogTime=0,_statusData={},_peersData=[],logPolling=false,logFilter='';
+var lastLogTime=0,_statusData={},_peersData=[],logPolling=false,logFilter='',chartType='line';
 
 async function refresh(){
   try{
@@ -468,6 +475,14 @@ function renderSideReports(data){
   document.getElementById('sideReports').innerHTML=html;
 }
 
+function setChartType(tp){
+  chartType=tp;
+  document.querySelectorAll('.chart-tab').forEach(function(el){
+    el.classList.toggle('active',el.dataset.chart===tp);
+  });
+  loadTPSChart();
+}
+
 async function loadTPSChart(){
   try{
     var sel=document.getElementById('tpsModelSelect');
@@ -480,7 +495,8 @@ async function loadTPSChart(){
     sel.innerHTML='<option value="">All</option>';
     prev.forEach(function(m){sel.innerHTML+='<option value="'+esc(m)+'"'+(m===cur?' selected':'')+'>'+esc(m)+'</option>';});
     if(!cur&&prev.length) sel.value='';
-    drawTPSChart(pts);
+    if(chartType==='hist') drawTPSHistogram(pts);
+    else drawTPSChart(pts);
   }catch(e){}
 }
 
@@ -552,6 +568,76 @@ function drawTPSChart(pts){
   ctx.fillText(last.tps.toFixed(1)+' tok/s',x(last.timestamp)+4,y(last.timestamp)-4);
   ctx.fillStyle='#6e7681';ctx.font='7px sans-serif';
   ctx.fillText('now',x(last.timestamp)+4,y(last.timestamp)+8);
+}
+
+function drawTPSHistogram(pts){
+  var canvas=document.getElementById('tpsChart');
+  var ctx=canvas.getContext('2d');
+  var rect=canvas.parentElement.getBoundingClientRect();
+  canvas.width=(rect.width||760)*2;canvas.height=160*2;
+  ctx.scale(2,2);
+  var W=canvas.width/2,H=canvas.height/2;
+  ctx.clearRect(0,0,W,H);
+  document.getElementById('tpsRange').textContent=pts.length+' pts';
+  if(!pts.length){
+    ctx.fillStyle='#6e7681';ctx.font='11px sans-serif';ctx.textAlign='center';
+    ctx.fillText('No TPS data',W/2,H/2);return;
+  }
+
+  var bins=20;
+  var maxTPS=0,minTPS=Infinity;
+  pts.forEach(function(p){if(p.tps>maxTPS)maxTPS=p.tps;if(p.tps<minTPS)minTPS=p.tps;});
+  if(maxTPS===0)maxTPS=1;
+  var range=maxTPS-minTPS||1;
+  var binSize=range/bins;
+  var counts=new Array(bins).fill(0);
+  pts.forEach(function(p){
+    var idx=Math.min(bins-1,Math.floor((p.tps-minTPS)/binSize));
+    counts[idx]++;
+  });
+  var maxCount=Math.max(1,...counts);
+
+  var pad=10,topPad=14,bottomPad=22,leftPad=42,rightPad=14;
+  var plotW=W-leftPad-rightPad,plotH=H-topPad-bottomPad;
+  var barW=plotW/bins;
+
+  ctx.strokeStyle='#21262d';ctx.lineWidth=0.5;
+  var steps=4;
+  for(var i=0;i<=steps;i++){
+    var v=(maxCount*i/steps);
+    var yy=topPad+plotH-(v/maxCount)*plotH;
+    ctx.beginPath();ctx.moveTo(leftPad,yy);ctx.lineTo(leftPad+plotW,yy);ctx.stroke();
+    ctx.fillStyle='#6e7681';ctx.font='8px monospace';ctx.textAlign='right';
+    ctx.fillText(Math.round(v),leftPad-4,yy+3);
+  }
+
+  ctx.fillStyle='rgba(57,210,192,0.6)';
+  for(var i=0;i<bins;i++){
+    var barH=(counts[i]/maxCount)*plotH;
+    var x=leftPad+i*barW+1;
+    var w=Math.max(1,barW-2);
+    var y=topPad+plotH-barH;
+    ctx.fillRect(x,y,w,barH);
+  }
+
+  ctx.fillStyle='#8b949e';ctx.font='8px monospace';ctx.textAlign='right';
+  var midBin=Math.floor(bins/4);
+  var labelBins=[0,midBin,Math.floor(bins/2),bins-midBin-1,bins-1];
+  labelBins.forEach(function(i){
+    var val=(minTPS+i*binSize).toFixed(1);
+    ctx.fillText(val,leftPad+i*barW+barW/2+8,H-4);
+  });
+
+  ctx.fillStyle='#8b949e';ctx.font='8px sans-serif';ctx.textAlign='right';
+  ctx.fillText('bins: '+bins+'  |  median: '+median(pts.map(function(p){return p.tps;})).toFixed(1)+' tok/s',leftPad+plotW,topPad+10);
+  ctx.fillStyle='#6e7681';ctx.font='7px sans-serif';ctx.textAlign='center';
+  ctx.fillText('TPS bucket',W/2,H-1);
+}
+
+function median(arr){
+  var s=arr.slice().sort(function(a,b){return a-b;});
+  var mid=Math.floor(s.length/2);
+  return s.length%2?s[mid]:(s[mid-1]+s[mid])/2;
 }
 
 function initTabs(){
