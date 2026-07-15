@@ -210,6 +210,9 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/queue", hs.handleQueue)
 	mux.HandleFunc("/api/peers", hs.handlePeers)
 	mux.HandleFunc("POST /api/peers/register", hs.handlePeerRegister)
+	mux.HandleFunc("POST /api/peers/introduce", hs.handlePeerIntroduce)
+	mux.HandleFunc("POST /api/peers/scan", hs.handlePeerScan)
+	mux.HandleFunc("/api/peers/diagnostics", hs.handleMeshDiagnostics)
 	mux.HandleFunc("/api/ollama/health", hs.handleOllamaHealth)
 	mux.HandleFunc("/api/nodes", hs.handleNodes)
 	mux.HandleFunc("/api/providers", hs.handleProviders)
@@ -487,6 +490,60 @@ func (hs *HiveServer) handlePeerRegister(w http.ResponseWriter, r *http.Request)
 	}
 	hs.mesh.RegisterPeer(body.ServerID, body.Endpoint, body.MaxConcurrent, body.OllamaModel)
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (hs *HiveServer) handlePeerIntroduce(w http.ResponseWriter, r *http.Request) {
+	if hs.mesh == nil {
+		http.Error(w, "mesh not enabled", http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		ServerID      string `json:"server_id"`
+		Endpoint      string `json:"endpoint"`
+		MaxConcurrent int    `json:"max_concurrent"`
+		OllamaModel   string `json:"ollama_model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.ServerID == "" || body.Endpoint == "" {
+		http.Error(w, "server_id and endpoint required", http.StatusBadRequest)
+		return
+	}
+	if body.ServerID == getServerID() {
+		writeJSON(w, map[string]string{"status": "skipped"})
+		return
+	}
+	hs.mesh.RegisterPeer(body.ServerID, body.Endpoint, body.MaxConcurrent, body.OllamaModel)
+	logInfo("Peer introduced self: %s at %s", body.ServerID, body.Endpoint)
+	writeJSON(w, map[string]string{"status": "registered"})
+}
+
+func (hs *HiveServer) handlePeerScan(w http.ResponseWriter, r *http.Request) {
+	if hs.mesh == nil {
+		http.Error(w, "mesh not enabled", http.StatusBadRequest)
+		return
+	}
+	seedPeers := getSeedPeers()
+	hs.mesh.Rescan(seedPeers)
+	writeJSON(w, map[string]interface{}{
+		"status":     "ok",
+		"seed_peers": seedPeers,
+	})
+}
+
+func (hs *HiveServer) handleMeshDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if hs.mesh == nil {
+		writeJSON(w, map[string]interface{}{
+			"enabled": false,
+		})
+		return
+	}
+	diag := hs.mesh.GetDiagnostics()
+	diag["server_id"] = getServerID()
+	diag["mesh_enabled"] = true
+	writeJSON(w, diag)
 }
 
 func (hs *HiveServer) handleOllamaHealth(w http.ResponseWriter, r *http.Request) {
