@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  # Ollama inference server
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hive Server (main node)
+  hive-server:
+    build:
+      context: .
+      dockerfile: hive-server-go/Dockerfile
+    container_name: hive-server-go
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+      - "8082:8082/udp"
+    volumes:
+      - hive-data:/data
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=llama3.1:8b
+      - SERVER_PORT=8081
+      - MAX_CONCURRENT=4
+      - MAX_CLIENTS=10
+      - MESH_ENABLED=true
+      - MESH_DISCOVERY_PORT=8082
+      - MESH_ANNOUNCE_ADDRESS=${MESH_ANNOUNCE_ADDRESS:-}
+      - MESH_SEED_PEERS=${MESH_SEED_PEERS:-}
+      - MESH_MODEL_MAP=${MESH_MODEL_MAP:-}
+      - SERVER_ID=hive-main
+      - HIVE_DB_PATH=/data/hive-server.db
+      - HIVE_API_KEY=${HIVE_API_KEY:-}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:8081/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Hivemind client (optional)
+  hivemind-client:
+    build:
+      context: .
+      dockerfile: hivemind-client/Dockerfile
+    container_name: hivemind-client
+    restart: unless-stopped
+    environment:
+      - HIVE_SERVER_URL=http://hive-server:8081
+      - CLIENT_ID=hivemind-client
+    depends_on:
+      hive-server:
+        condition: service_healthy
+
+volumes:
+  ollama-data:
+  hive-data:

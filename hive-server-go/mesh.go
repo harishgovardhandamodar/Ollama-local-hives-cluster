@@ -176,6 +176,7 @@ func (m *MeshDiscovery) Start(capacityFn func() int, queueFn func() map[string]i
 	go m.listenerLoop()
 	go m.cleanupLoop()
 	go m.seedProbeLoop(seedPeers)
+	go m.healthPollLoop()
 	logInfo("Mesh discovery started on port %d, announcing as %s", m.discoveryPort, m.announceAddr)
 }
 
@@ -301,10 +302,40 @@ func (m *MeshDiscovery) sendBeacon() {
 		beacon["clients"] = m.getClients()
 	}
 
+	// Include model list in beacon for peer model registry
+	if models := m.getLocalModels(); len(models) > 0 {
+		beacon["models"] = models
+	}
+
 	data, _ := json.Marshal(beacon)
 
 	// Broadcast on all interfaces using subnet-directed broadcast
 	m.broadcastOnAllInterfaces(data)
+}
+
+// getLocalModels returns the list of locally available models
+func (m *MeshDiscovery) getLocalModels() []string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/api/ollama/health", m.serverPort))
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+
+	var models []string
+	for _, m := range result.Models {
+		models = append(models, m.Name)
+	}
+	return models
 }
 
 // broadcastOnAllInterfaces sends the beacon to every IPv4 broadcast address
@@ -498,6 +529,42 @@ func (m *MeshDiscovery) seedProbeLoop(seedPeers []string) {
 		case <-ticker.C:
 			for _, addr := range seedPeers {
 				m.probeSeed(addr)
+			}
+		}
+	}
+}
+
+// healthPollLoop actively polls peer health every 10 seconds (faster than beacon timeout)
+func (m *MeshDiscovery) healthPollLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		case <-ticker.C:
+			m.mu.RLock()
+			peers := make([]*PeerInfo, 0, len(m.peers))
+			for _, p := range m.peers {
+				peers = append(peers, p)
+			}
+			m.mu.RUnlock()
+
+			for _, peer := range peers {
+				go func(p *PeerInfo) {
+					client := &http.Client{Timeout: 5 * time.Second}
+					resp, err := client.Get(p.Endpoint + "/v1/health")
+					if err != nil {
+						return
+					}
+					resp.Body.Close()
+					// Update last seen on successful health check
+					m.mu.Lock()
+					if existing, ok := m.peers[p.ServerID]; ok {
+						existing.LastSeen = now()
+					}
+					m.mu.Unlock()
+				}(peer)
 			}
 		}
 	}

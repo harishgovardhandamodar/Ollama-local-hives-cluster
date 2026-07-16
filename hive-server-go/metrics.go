@@ -1,120 +1,198 @@
 package main
 
 import (
-	"os/exec"
-	"runtime"
-	"strconv"
+	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 )
 
-type GPUInfo struct {
-	Model     string  `json:"model"`
-	MemoryGB  int     `json:"memory_gb"`
-	VRAMUsed  float64 `json:"vram_used_gb"`
-	VRAMTotal float64 `json:"vram_total_gb"`
-	DriverVer string  `json:"driver_version"`
+type MetricsCollector struct {
+	mu sync.RWMutex
+
+	// Counters
+	jobsSubmitted   int64
+	jobsCompleted   int64
+	jobsFailed      int64
+	messagesCached  int64
+	peersForwarded  int64
+
+	// Gauges
+	queueDepth      int
+	runningJobs     int
+	connectedPeers  int
+	activeClients   int
+
+	// Histograms (simplified)
+	jobDurations    []float64
+	tokenCounts     []float64
+	tpsValues       []float64
+
+	startTime time.Time
 }
 
-type SystemMetrics struct {
-	mu           sync.RWMutex
-	gpuInfo      []GPUInfo
-	hasNvidia    bool
-	lastCheck    time.Time
-	checkInterval time.Duration
+var globalMetrics = &MetricsCollector{
+	startTime: time.Now(),
 }
 
-func NewSystemMetrics() *SystemMetrics {
-	return &SystemMetrics{
-		checkInterval: 15 * time.Second,
+func (m *MetricsCollector) IncrJobsSubmitted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobsSubmitted++
+}
+
+func (m *MetricsCollector) IncrJobsCompleted() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobsCompleted++
+}
+
+func (m *MetricsCollector) IncrJobsFailed() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobsFailed++
+}
+
+func (m *MetricsCollector) IncrMessagesCached() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.messagesCached++
+}
+
+func (m *MetricsCollector) IncrPeersForwarded() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peersForwarded++
+}
+
+func (m *MetricsCollector) SetQueueDepth(depth int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.queueDepth = depth
+}
+
+func (m *MetricsCollector) SetRunningJobs(running int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runningJobs = running
+}
+
+func (m *MetricsCollector) SetConnectedPeers(peers int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.connectedPeers = peers
+}
+
+func (m *MetricsCollector) SetActiveClients(clients int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.activeClients = clients
+}
+
+func (m *MetricsCollector) RecordJobDuration(seconds float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.jobDurations = append(m.jobDurations, seconds)
+	if len(m.jobDurations) > 1000 {
+		m.jobDurations = m.jobDurations[1:]
 	}
 }
 
-func (sm *SystemMetrics) GetGPUInfo() []GPUInfo {
-	sm.mu.RLock()
-	age := time.Since(sm.lastCheck)
-	sm.mu.RUnlock()
-	if age > sm.checkInterval {
-		sm.refresh()
-	}
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	out := make([]GPUInfo, len(sm.gpuInfo))
-	copy(out, sm.gpuInfo)
-	return out
-}
-
-func (sm *SystemMetrics) HasNvidia() bool {
-	sm.mu.RLock()
-	age := time.Since(sm.lastCheck)
-	sm.mu.RUnlock()
-	if age > sm.checkInterval {
-		sm.refresh()
-	}
-	sm.mu.RLock()
-	defer sm.mu.RUnlock()
-	return sm.hasNvidia
-}
-
-func (sm *SystemMetrics) refresh() {
-	sm.mu.Lock()
-	defer sm.mu.Unlock()
-	sm.lastCheck = time.Now()
-
-	gpus := detectNvidiaGPU()
-	sm.gpuInfo = gpus
-	sm.hasNvidia = len(gpus) > 0
-}
-
-func detectNvidiaGPU() []GPUInfo {
-	out, err := exec.Command("nvidia-smi",
-		"--query-gpu=index,name,memory.total,memory.used,driver_version",
-		"--format=csv,noheader,nounits").Output()
-	if err != nil {
-		return nil
-	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	var gpus []GPUInfo
-	for _, line := range lines {
-		parts := strings.Split(line, ", ")
-		if len(parts) < 5 {
-			continue
-		}
-		memTotalMB, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-		memUsedMB, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-		gpus = append(gpus, GPUInfo{
-			Model:     strings.TrimSpace(parts[1]),
-			MemoryGB:  int(memTotalMB / 1024),
-			VRAMTotal: memTotalMB / 1024,
-			VRAMUsed:  memUsedMB / 1024,
-			DriverVer: strings.TrimSpace(parts[4]),
-		})
-	}
-	return gpus
-}
-
-type HardwareInfo struct {
-	Platform     string    `json:"platform"`
-	Architecture string    `json:"architecture"`
-	Hostname     string    `json:"hostname"`
-	GPUs         []GPUInfo `json:"gpus,omitempty"`
-}
-
-func getHardwareInfo() HardwareInfo {
-	sm := NewSystemMetrics()
-	gpus := sm.GetGPUInfo()
-	return HardwareInfo{
-		Platform:     runtime.GOOS,
-		Architecture: runtime.GOARCH,
-		GPUs:         gpus,
+func (m *MetricsCollector) RecordTokenCount(tokens int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokenCounts = append(m.tokenCounts, float64(tokens))
+	if len(m.tokenCounts) > 1000 {
+		m.tokenCounts = m.tokenCounts[1:]
 	}
 }
 
-func getOllamaVersion() string {
-	out, err := exec.Command("ollama", "--version").Output()
-	if err != nil {
-		return "unknown"
+func (m *MetricsCollector) RecordTPS(tps float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tpsValues = append(m.tpsValues, tps)
+	if len(m.tpsValues) > 1000 {
+		m.tpsValues = m.tpsValues[1:]
 	}
-	return strings.TrimSpace(string(out))
+}
+
+func (m *MetricsCollector) Render() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var sb strings.Builder
+
+	// Metadata
+	sb.WriteString("# HELP hive_uptime_seconds Server uptime in seconds\n")
+	sb.WriteString("# TYPE hive_uptime_seconds gauge\n")
+	sb.WriteString(fmt.Sprintf("hive_uptime_seconds %f\n", time.Since(m.startTime).Seconds()))
+
+	// Counters
+	sb.WriteString("# HELP hive_jobs_total Total jobs submitted\n")
+	sb.WriteString("# TYPE hive_jobs_total counter\n")
+	sb.WriteString(fmt.Sprintf("hive_jobs_total %d\n", m.jobsSubmitted))
+
+	sb.WriteString("# HELP hive_jobs_completed_total Total jobs completed\n")
+	sb.WriteString("# TYPE hive_jobs_completed_total counter\n")
+	sb.WriteString(fmt.Sprintf("hive_jobs_completed_total %d\n", m.jobsCompleted))
+
+	sb.WriteString("# HELP hive_jobs_failed_total Total jobs failed\n")
+	sb.WriteString("# TYPE hive_jobs_failed_total counter\n")
+	sb.WriteString(fmt.Sprintf("hive_jobs_failed_total %d\n", m.jobsFailed))
+
+	sb.WriteString("# HELP hive_messages_cached_total Total messages served from cache\n")
+	sb.WriteString("# TYPE hive_messages_cached_total counter\n")
+	sb.WriteString(fmt.Sprintf("hive_messages_cached_total %d\n", m.messagesCached))
+
+	sb.WriteString("# HELP hive_peers_forwarded_total Total jobs forwarded to peers\n")
+	sb.WriteString("# TYPE hive_peers_forwarded_total counter\n")
+	sb.WriteString(fmt.Sprintf("hive_peers_forwarded_total %d\n", m.peersForwarded))
+
+	// Gauges
+	sb.WriteString("# HELP hive_queue_depth Current queue depth\n")
+	sb.WriteString("# TYPE hive_queue_depth gauge\n")
+	sb.WriteString(fmt.Sprintf("hive_queue_depth %d\n", m.queueDepth))
+
+	sb.WriteString("# HELP hive_running_jobs Currently running jobs\n")
+	sb.WriteString("# TYPE hive_running_jobs gauge\n")
+	sb.WriteString(fmt.Sprintf("hive_running_jobs %d\n", m.runningJobs))
+
+	sb.WriteString("# HELP hive_connected_peers Number of connected peers\n")
+	sb.WriteString("# TYPE hive_connected_peers gauge\n")
+	sb.WriteString(fmt.Sprintf("hive_connected_peers %d\n", m.connectedPeers))
+
+	sb.WriteString("# HELP hive_active_clients Number of active clients\n")
+	sb.WriteString("# TYPE hive_active_clients gauge\n")
+	sb.WriteString(fmt.Sprintf("hive_active_clients %d\n", m.activeClients))
+
+	// Histograms (simplified as summaries)
+	if len(m.jobDurations) > 0 {
+		sb.WriteString("# HELP hive_job_duration_seconds Job execution duration\n")
+		sb.WriteString("# TYPE hive_job_duration_seconds summary\n")
+		sb.WriteString(fmt.Sprintf("hive_job_duration_seconds_sum %f\n", sumFloat64(m.jobDurations)))
+		sb.WriteString(fmt.Sprintf("hive_job_duration_seconds_count %d\n", len(m.jobDurations)))
+	}
+
+	if len(m.tpsValues) > 0 {
+		sb.WriteString("# HELP hive_tokens_per_second Tokens per second\n")
+		sb.WriteString("# TYPE hive_tokens_per_second summary\n")
+		sb.WriteString(fmt.Sprintf("hive_tokens_per_second_sum %f\n", sumFloat64(m.tpsValues)))
+		sb.WriteString(fmt.Sprintf("hive_tokens_per_second_count %d\n", len(m.tpsValues)))
+	}
+
+	return sb.String()
+}
+
+func sumFloat64(vals []float64) float64 {
+	var sum float64
+	for _, v := range vals {
+		sum += v
+	}
+	return sum
+}
+
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Write([]byte(globalMetrics.Render()))
 }

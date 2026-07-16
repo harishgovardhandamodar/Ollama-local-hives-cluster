@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	serverVersion = "1.7.0"
+	serverVersion = "1.8.0"
 	startTime     = time.Now()
+	globalQueue   *OllamaQueue // global reference for streaming
 )
 
 type HiveServer struct {
@@ -48,6 +49,7 @@ type ServerConfig struct {
 	MeshEnabled        bool
 	MaxClients         int
 	CustomProviderURLs []string
+	Cache              *ResponseCache
 }
 
 func NewClientManager(maxClients int) *ClientManager {
@@ -132,6 +134,7 @@ func (cm *ClientManager) IncrementCompleted(clientID string) {
 
 func NewHiveServer(cfg ServerConfig) *HiveServer {
 	queue := NewOllamaQueue(cfg.MaxConcurrent, cfg.OllamaURL, cfg.OllamaModel)
+	globalQueue = queue // Set global reference for streaming
 	var mesh *MeshDiscovery
 	if cfg.MeshEnabled {
 		mesh = NewMeshDiscovery(
@@ -249,6 +252,9 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", hs.handleOpenAIChatCompletions)
 	mux.HandleFunc("GET /v1/models", hs.handleOpenAIListModels)
 	mux.HandleFunc("GET /v1/health", hs.handleOpenAIHealth)
+
+	// Model pull proxy (pull from peers)
+	mux.HandleFunc("POST /api/models/pull-proxy", hs.handleModelPullProxy)
 }
 
 func (hs *HiveServer) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -378,6 +384,30 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check cache for identical requests
+	if hs.cfg.Cache != nil && body.JobType == "chat" {
+		if msgs, ok := body.Payload["messages"].([]interface{}); ok && len(msgs) > 0 {
+			var strMsgs []map[string]string
+			for _, m := range msgs {
+				if msgMap, ok := m.(map[string]interface{}); ok {
+					strMsgs = append(strMsgs, map[string]string{
+						"role":    fmt.Sprintf("%v", msgMap["role"]),
+						"content": fmt.Sprintf("%v", msgMap["content"]),
+					})
+				}
+			}
+			if len(strMsgs) > 0 {
+				model := fmt.Sprintf("%v", body.Payload["model"])
+				cacheKey := hs.cfg.Cache.GenerateKey(model, strMsgs)
+				if cached, found := hs.cfg.Cache.Get(cacheKey); found {
+					globalMetrics.IncrMessagesCached()
+					writeJSON(w, cached)
+					return
+				}
+			}
+		}
+	}
+
 	if hs.cfg.MeshEnabled && hs.mesh != nil {
 		capacity := hs.queue.GetAvailableCapacity()
 		if capacity <= 0 {
@@ -385,9 +415,11 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 			if peer != nil {
 				jobID := fmt.Sprintf("%s:%s:%d", body.ClientID, body.JobType, time.Now().UnixMilli())
 				logInfo("Local queue full, forwarding job %s to peer %s", jobID, peer.ServerID)
+				globalMetrics.IncrPeersForwarded()
 				forwarded := forwardJobToPeer(peer, jobID, body.ClientID, body.JobType, body.Payload)
 				if forwarded != nil {
 					client.JobsSubmitted++
+					globalMetrics.IncrJobsSubmitted()
 					writeJSON(w, forwarded)
 					return
 				}
@@ -400,6 +432,7 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 	job := NewJob(jobID, body.ClientID, body.JobType, body.Payload)
 	hs.queue.Submit(job)
 	client.JobsSubmitted++
+	globalMetrics.IncrJobsSubmitted()
 	logInfo("Job submitted: %s (type=%s, client=%s)", jobID, body.JobType, body.ClientID)
 	writeJSON(w, job)
 }
@@ -1105,5 +1138,69 @@ func (hs *HiveServer) handleAgentModels(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]interface{}{
 		"live_models": liveModels,
 		"registry":    registryModels,
+	})
+}
+
+// handleModelPullProxy pulls a model from a peer's Ollama instance
+func (hs *HiveServer) handleModelPullProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Model    string `json:"model"`
+		PeerID   string `json:"peer_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.Model == "" {
+		http.Error(w, "model required", http.StatusBadRequest)
+		return
+	}
+
+	// Find peer with model or use specified peer
+	var peer *PeerInfo
+	if body.PeerID != "" && hs.mesh != nil {
+		peers := hs.mesh.GetAlivePeers()
+		for _, p := range peers {
+			if p.ServerID == body.PeerID {
+				peer = p
+				break
+			}
+		}
+	} else {
+		peer = hs.findPeerWithModel(body.Model)
+	}
+
+	if peer == nil {
+		http.Error(w, `{"error":"no peer found with model"}`, http.StatusNotFound)
+		return
+	}
+
+	// Forward pull request to peer
+	payload := map[string]interface{}{
+		"name": body.Model,
+	}
+	data, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Post(peer.Endpoint+"/api/models/pull", "application/json", bytes.NewReader(data))
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+
+	writeJSON(w, map[string]interface{}{
+		"status":  "pulling",
+		"model":   body.Model,
+		"peer":    peer.ServerID,
+		"result":  result,
 	})
 }

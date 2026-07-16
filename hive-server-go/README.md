@@ -1,16 +1,18 @@
 # Hive Server Go
 
-A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features concurrent job queuing, peer mesh discovery, GPU-aware hardware metrics, SQLite-backed token usage reporting, a live dashboard, **OpenAI-compatible API**, and a **Coding Agent API** with session management and context compression.
+A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features concurrent job queuing, peer mesh discovery, GPU-aware hardware metrics, SQLite-backed token usage reporting, a live dashboard, **OpenAI-compatible API**, **Coding Agent API**, and **enterprise-grade hardening**.
 
 ## Features
 
-- **Job Queue** — Goroutine worker pool with configurable concurrency, Ollama proxy, token tracking
-- **Mesh Discovery** — UDP broadcast peer discovery, seed peers, cross-platform model mapping (MLX→NVIDIA)
+- **Job Queue** — Goroutine worker pool with configurable concurrency, priority queues, Ollama proxy, token tracking
+- **Mesh Discovery** — UDP broadcast peer discovery, seed peers, cross-platform model mapping (MLX→NVIDIA), active health polling
 - **OpenAI-Compatible API** — `/v1/chat/completions` (streaming + non-streaming), `/v1/models` (local + peer), `/v1/health`
 - **Coding Agent API** — Session-based context management, auto-compression, audit logging for Hermes/OpenCode/Codex
 - **Auto-Forwarding** — When a model isn't found locally, requests are automatically forwarded to the peer that has it
+- **Enterprise Security** — API key authentication, rate limiting, structured JSON logging
+- **Response Cache** — Prompt-hash based caching with configurable TTL for repeated queries
+- **Metrics** — Prometheus-compatible `/metrics` endpoint with counters, gauges, and histograms
 - **Live Dashboard** — Real-time stats, queue, mesh topology, token usage charts, live logs
-- **SQLite Persistence** — Token usage, coding agent sessions/messages/audit logs
 
 ## Quick Start
 

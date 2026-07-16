@@ -19,6 +19,15 @@ const (
 	JobFailed    JobStatus = "failed"
 )
 
+type JobPriority int
+
+const (
+	PriorityLow    JobPriority = 0
+	PriorityNormal JobPriority = 1
+	PriorityHigh   JobPriority = 2
+	PriorityMax    JobPriority = 3
+)
+
 type Job struct {
 	ID            string                 `json:"job_id"`
 	ClientID      string                 `json:"client_id"`
@@ -37,9 +46,21 @@ type Job struct {
 	EvalTokens    int                    `json:"completion_tokens,omitempty"`
 	TotalTokens   int                    `json:"total_tokens,omitempty"`
 	EvalDuration  float64                `json:"-"`
+	Priority      JobPriority            `json:"priority"`
 }
 
 func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
+	// Assign priority based on job type
+	var priority JobPriority
+	switch jobType {
+	case "coding_agent_chat", "chat":
+		priority = PriorityHigh
+	case "generate", "embed", "get_embedding":
+		priority = PriorityNormal
+	default:
+		priority = PriorityLow
+	}
+
 	return &Job{
 		ID:         id,
 		ClientID:   clientID,
@@ -47,6 +68,7 @@ func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
 		PayloadMap: payload,
 		Status:     JobPending,
 		CreatedAt:  now(),
+		Priority:   priority,
 	}
 }
 
@@ -66,12 +88,15 @@ type OllamaQueue struct {
 	ollamaURL     string
 	ollamaModel   string
 
+	// Priority queues
+	priorityQueues [4]chan *Job // indexed by JobPriority
+
 	httpClient    *http.Client
 	httpClientMu  sync.Mutex
 }
 
 func NewOllamaQueue(maxConcurrent int, ollamaURL, ollamaModel string) *OllamaQueue {
-	return &OllamaQueue{
+	q := &OllamaQueue{
 		jobCh:         make(chan *Job, 1000),
 		stopCh:        make(chan struct{}),
 		running:       make(map[string]*Job),
@@ -88,6 +113,14 @@ func NewOllamaQueue(maxConcurrent int, ollamaURL, ollamaModel string) *OllamaQue
 			},
 		},
 	}
+
+	// Initialize priority queues with different capacities
+	q.priorityQueues[PriorityLow] = make(chan *Job, 200)
+	q.priorityQueues[PriorityNormal] = make(chan *Job, 500)
+	q.priorityQueues[PriorityHigh] = make(chan *Job, 200)
+	q.priorityQueues[PriorityMax] = make(chan *Job, 100)
+
+	return q
 }
 
 func (q *OllamaQueue) Start() {
@@ -103,6 +136,16 @@ func (q *OllamaQueue) Stop() {
 }
 
 func (q *OllamaQueue) Submit(job *Job) bool {
+	// Use priority queue if available
+	if int(job.Priority) < len(q.priorityQueues) {
+		select {
+		case q.priorityQueues[job.Priority] <- job:
+			return true
+		default:
+			// Priority queue full, try main queue
+		}
+	}
+
 	select {
 	case q.jobCh <- job:
 		return true
@@ -117,7 +160,30 @@ func (q *OllamaQueue) worker(id int) {
 		select {
 		case <-q.stopCh:
 			return
-		case job := <-q.jobCh:
+		default:
+			// Try high priority first, then normal, then low
+			var job *Job
+			for i := PriorityMax; i >= PriorityLow; i-- {
+				select {
+				case job = <-q.priorityQueues[i]:
+					goto process
+				default:
+					continue
+				}
+			}
+
+			// Try main queue
+			select {
+			case job = <-q.jobCh:
+			case <-q.stopCh:
+				return
+			}
+
+		process:
+			if job == nil {
+				continue
+			}
+
 			job.Status = JobRunning
 			now := now()
 			job.StartedAt = &now
@@ -132,6 +198,27 @@ func (q *OllamaQueue) worker(id int) {
 			delete(q.running, job.ID)
 			q.completed[job.ID] = job
 			q.mu.Unlock()
+
+			// Notify subscribers
+			NotifyJobUpdate(job)
+
+			// Track metrics
+			if job.StartedAt != nil && job.CompletedAt != nil {
+				duration := *job.CompletedAt - *job.StartedAt
+				globalMetrics.RecordJobDuration(duration)
+			}
+			globalMetrics.RecordTokenCount(job.TotalTokens)
+			if job.TotalTokens > 0 && job.StartedAt != nil && job.CompletedAt != nil {
+				duration := *job.CompletedAt - *job.StartedAt
+				if duration > 0 {
+					globalMetrics.RecordTPS(float64(job.TotalTokens) / duration)
+				}
+			}
+			if job.Status == JobCompleted {
+				globalMetrics.IncrJobsCompleted()
+			} else {
+				globalMetrics.IncrJobsFailed()
+			}
 		}
 	}
 }

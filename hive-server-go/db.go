@@ -31,6 +31,15 @@ func NewDBStore(path string) (*DBStore, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
+	// Enable WAL mode for concurrent reads during writes
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		logWarn("Failed to enable WAL mode: %v", err)
+	}
+	// Busy timeout for concurrent access
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		logWarn("Failed to set busy timeout: %v", err)
+	}
+
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}

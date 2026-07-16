@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -92,27 +93,65 @@ var (
 	multiError       = io.MultiWriter(os.Stderr, &logWriter{rb: globalRingBuffer, logger: errorLogger, name: "hive-server"})
 	hivelog          = log.New(multiInfo, "", 0)
 	hiveerror        = log.New(multiError, "", 0)
+	jsonLogging      = false
 )
 
 func init() {
 	hivelog.SetFlags(log.Ltime)
+	// Enable JSON logging if HIVE_LOG_JSON=true
+	if os.Getenv("HIVE_LOG_JSON") == "true" {
+		jsonLogging = true
+	}
 }
 
 func logInfo(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
-	hivelog.Printf("INFO [hive-server] %s", msg)
+	if jsonLogging {
+		entry := map[string]interface{}{
+			"ts":      time.Now().Format(time.RFC3339),
+			"level":   "INFO",
+			"logger":  "hive-server",
+			"message": msg,
+		}
+		data, _ := json.Marshal(entry)
+		hivelog.Printf("%s", string(data))
+	} else {
+		hivelog.Printf("INFO [hive-server] %s", msg)
+	}
 }
 
 func logError(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	globalRingBuffer.Write("ERROR", msg, "hive-server")
-	errorLogger.Printf("[hive-server] %s", msg)
+	if jsonLogging {
+		entry := map[string]interface{}{
+			"ts":      time.Now().Format(time.RFC3339),
+			"level":   "ERROR",
+			"logger":  "hive-server",
+			"message": msg,
+		}
+		data, _ := json.Marshal(entry)
+		errorLogger.Printf("%s", string(data))
+	} else {
+		errorLogger.Printf("[hive-server] %s", msg)
+	}
 }
 
 func logWarn(format string, args ...interface{}) {
 	msg := fmt.Sprintf(format, args...)
 	globalRingBuffer.Write("WARN", msg, "hive-server")
-	hivelog.Printf("WARN [hive-server] %s", msg)
+	if jsonLogging {
+		entry := map[string]interface{}{
+			"ts":      time.Now().Format(time.RFC3339),
+			"level":   "WARN",
+			"logger":  "hive-server",
+			"message": msg,
+		}
+		data, _ := json.Marshal(entry)
+		hivelog.Printf("%s", string(data))
+	} else {
+		hivelog.Printf("WARN [hive-server] %s", msg)
+	}
 }
 
 func getLogs(since float64) []LogEntry {

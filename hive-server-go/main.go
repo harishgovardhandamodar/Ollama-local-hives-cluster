@@ -11,18 +11,45 @@ import (
 )
 
 func main() {
-	ollamaURL := envOr("OLLAMA_BASE_URL", "http://localhost:11434")
-	ollamaModel := envOr("OLLAMA_MODEL", "llama3.1:8b")
-	serverPort := getEnvInt("SERVER_PORT", 8081)
-	maxConcurrent := getEnvInt("MAX_CONCURRENT", 2)
-	meshEnabled := os.Getenv("MESH_ENABLED") != "false"
-	maxClients := getEnvInt("MAX_CLIENTS", 5)
-	readTimeout := getEnvInt("HTTP_READ_TIMEOUT", 30)
-	writeTimeout := getEnvInt("HTTP_WRITE_TIMEOUT", 600)
-	idleTimeout := getEnvInt("HTTP_IDLE_TIMEOUT", 120)
-	customProviders := splitAndTrim(os.Getenv("CUSTOM_PROVIDER_URLS"), ",")
+	// Load config file if exists (env vars override file config)
+	cfgFile, _ := LoadConfigFile("")
 
+	// Apply config file defaults, then env overrides
+	ollamaURL := envOrDefault("OLLAMA_BASE_URL", firstNonEmpty(cfgFile.Server.OllamaURL, "http://localhost:11434"))
+	ollamaModel := envOrDefault("OLLAMA_MODEL", firstNonEmpty(cfgFile.Server.OllamaModel, "llama3.1:8b"))
+	serverPort := envOrDefaultInt("SERVER_PORT", firstNonZero(cfgFile.Server.Port, 8081))
+	maxConcurrent := envOrDefaultInt("MAX_CONCURRENT", firstNonZero(cfgFile.Server.MaxConcurrent, 2))
+	meshEnabled := os.Getenv("MESH_ENABLED") != "false"
+	maxClients := envOrDefaultInt("MAX_CLIENTS", firstNonZero(cfgFile.Server.MaxClients, 5))
+	readTimeout := envOrDefaultInt("HTTP_READ_TIMEOUT", firstNonZero(cfgFile.Server.ReadTimeout, 30))
+	writeTimeout := envOrDefaultInt("HTTP_WRITE_TIMEOUT", firstNonZero(cfgFile.Server.WriteTimeout, 600))
+	idleTimeout := envOrDefaultInt("HTTP_IDLE_TIMEOUT", firstNonZero(cfgFile.Server.IdleTimeout, 120))
+	apiKey := envOrDefault("HIVE_API_KEY", cfgFile.Server.APIKey)
+
+	var customProviders []string
+	if len(cfgFile.CustomProviders) > 0 {
+		customProviders = cfgFile.CustomProviders
+	}
+	if v := os.Getenv("CUSTOM_PROVIDER_URLS"); v != "" {
+		customProviders = splitAndTrim(v, ",")
+	}
+
+	// Initialize database with WAL mode
 	initDB()
+
+	// Initialize cache if enabled
+	cacheEnabled := os.Getenv("HIVE_CACHE_ENABLED") == "true" || cfgFile.Cache.Enabled
+	var cache *ResponseCache
+	if cacheEnabled {
+		cacheEntries := envOrDefaultInt("HIVE_CACHE_MAX_ENTRIES", firstNonZero(cfgFile.Cache.MaxEntries, 1000))
+		cacheTTL := envOrDefaultInt("HIVE_CACHE_TTL_SECONDS", firstNonZero(cfgFile.Cache.TTLSeconds, 300))
+		cache = NewResponseCache(cacheEntries, cacheTTL)
+		logInfo("Response cache enabled: %d entries, %ds TTL", cacheEntries, cacheTTL)
+	}
+
+	// Initialize rate limiter
+	rateLimit := envOrDefaultInt("HIVE_RATE_LIMIT", 100)
+	rl := NewRateLimiter(rateLimit, time.Minute)
 
 	cfg := ServerConfig{
 		OllamaURL:          ollamaURL,
@@ -32,6 +59,7 @@ func main() {
 		MeshEnabled:        meshEnabled,
 		MaxClients:         maxClients,
 		CustomProviderURLs: customProviders,
+		Cache:              cache,
 	}
 
 	server := NewHiveServer(cfg)
@@ -41,7 +69,14 @@ func main() {
 	mux := http.NewServeMux()
 	server.RegisterRoutes(mux)
 
-	handler := requestLogger(corsMiddleware(mux))
+	// Add metrics endpoint
+	mux.HandleFunc("/metrics", handleMetrics)
+
+	// Add job streaming endpoint
+	mux.HandleFunc("/api/jobs/stream", handleJobStream)
+
+	// Apply auth middleware
+	handler := AuthMiddleware(apiKey, rl, requestLogger(corsMiddleware(mux)))
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", serverPort),
@@ -51,31 +86,59 @@ func main() {
 		IdleTimeout:  time.Duration(idleTimeout) * time.Second,
 	}
 
-	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		sig := <-sigCh
-		logInfo("Received signal %v, shutting down...", sig)
+	// Graceful shutdown with job queue drain
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	go func() {
+		<-sigCh
+		logInfo("Received shutdown signal, draining job queue...")
+
+		// Give in-flight jobs up to 30 seconds to complete
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
+		// Stop accepting new jobs
 		server.Stop()
+
+		// Wait for HTTP server to finish in-flight requests
 		if err := httpServer.Shutdown(ctx); err != nil {
 			logError("HTTP server shutdown error: %v", err)
 		}
+
 		closeDB()
-		logInfo("Server stopped")
+		logInfo("Server stopped gracefully")
 		os.Exit(0)
 	}()
 
 	logInfo("Server listening on %s", httpServer.Addr)
 	logInfo("Ollama URL: %s", ollamaURL)
+	if apiKey != "" {
+		logInfo("API key authentication enabled")
+	}
 
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logError("Server error: %v", err)
 		os.Exit(1)
 	}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstNonZero(vals ...int) int {
+	for _, v := range vals {
+		if v != 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 func requestLogger(next http.Handler) http.Handler {
