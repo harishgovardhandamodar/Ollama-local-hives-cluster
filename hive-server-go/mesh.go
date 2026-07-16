@@ -32,6 +32,7 @@ type MeshDiscovery struct {
 	discoveryPort int
 	maxConcurrent int
 	ollamaModel   string
+	announceAddr  string // resolved LAN IP or env override
 
 	mu    sync.RWMutex
 	peers map[string]*PeerInfo
@@ -45,16 +46,103 @@ type MeshDiscovery struct {
 }
 
 func NewMeshDiscovery(serverID string, serverPort, discoveryPort, maxConcurrent int, ollamaModel string) *MeshDiscovery {
+	announceAddr := resolveAnnounceAddress(serverPort)
+	logInfo("Mesh announce address: %s", announceAddr)
 	return &MeshDiscovery{
 		serverID:      serverID,
 		serverPort:    serverPort,
 		discoveryPort: discoveryPort,
 		maxConcurrent: maxConcurrent,
 		ollamaModel:   ollamaModel,
+		announceAddr:  announceAddr,
 		peers:         make(map[string]*PeerInfo),
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 		stopCh:        make(chan struct{}),
 	}
+}
+
+// resolveAnnounceAddress determines the IP this server advertises to peers.
+// Priority: MESH_ANNOUNCE_ADDRESS env > auto-detect LAN IP > localhost fallback
+func resolveAnnounceAddress(serverPort int) string {
+	// 1. Explicit override via env
+	if addr := os.Getenv("MESH_ANNOUNCE_ADDRESS"); addr != "" {
+		if u, err := url.Parse(addr); err == nil && u.Host != "" {
+			return u.Host
+		}
+		return addr
+	}
+
+	// 2. Auto-detect LAN IP
+	if ip := detectLocalIP(); ip != "" {
+		return fmt.Sprintf("http://%s:%d", ip, serverPort)
+	}
+
+	// 3. Fallback
+	return fmt.Sprintf("http://localhost:%d", serverPort)
+}
+
+// detectLocalIP finds the first non-loopback, non-container IPv4 address
+// by enumerating network interfaces. Works on macOS, Linux, and Docker.
+func detectLocalIP() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+
+	for _, iface := range ifaces {
+		// Skip down interfaces
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		// Skip loopback
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		// Skip common virtual/container interfaces
+		name := iface.Name
+		if name == "" {
+			continue
+		}
+		// Skip Docker, br-, veth, virbr, tun, wg, utun prefixes
+		skipPrefixes := []string{"docker", "br-", "veth", "virbr", "tun", "wg", "utun", "lo", "vmnet", "utun"}
+		skip := false
+		for _, p := range skipPrefixes {
+			if len(name) >= len(p) && name[:len(p)] == p {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			// Only IPv4
+			if ip.To4() == nil {
+				continue
+			}
+			// Skip link-local
+			if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				continue
+			}
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func (m *MeshDiscovery) Start(capacityFn func() int, queueFn func() map[string]interface{}, clientsFn func() int) {
@@ -71,7 +159,7 @@ func (m *MeshDiscovery) Start(capacityFn func() int, queueFn func() map[string]i
 	go m.listenerLoop()
 	go m.cleanupLoop()
 	go m.seedProbeLoop(seedPeers)
-	logInfo("Mesh discovery started on port %d", m.discoveryPort)
+	logInfo("Mesh discovery started on port %d, announcing as %s", m.discoveryPort, m.announceAddr)
 }
 
 func (m *MeshDiscovery) Stop() {
@@ -125,7 +213,7 @@ func (m *MeshDiscovery) probeSeed(addr string) bool {
 func (m *MeshDiscovery) introduceSelf(peerBaseURL string) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"server_id":      m.serverID,
-		"endpoint":       fmt.Sprintf("http://localhost:%d", m.serverPort),
+		"endpoint":       m.announceAddr,
 		"max_concurrent": m.maxConcurrent,
 		"ollama_model":   m.ollamaModel,
 	})
@@ -193,7 +281,72 @@ func (m *MeshDiscovery) sendBeacon() {
 	}
 
 	data, _ := json.Marshal(beacon)
-	addr := &net.UDPAddr{IP: net.IPv4bcast, Port: m.discoveryPort}
+
+	// Broadcast on all interfaces using subnet-directed broadcast
+	m.broadcastOnAllInterfaces(data)
+}
+
+// broadcastOnAllInterfaces sends the beacon to every IPv4 broadcast address
+// on every active interface. This covers the case where machines are on
+// different subnets (e.g. wired vs wifi, or Docker bridges).
+func (m *MeshDiscovery) broadcastOnAllInterfaces(data []byte) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		// Fallback to limited broadcast
+		m.sendBeaconTo(net.IPv4bcast, data)
+		return
+	}
+
+	sent := false
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() == nil || ip.IsLoopback() {
+				continue
+			}
+			bcast := broadcastAddr(ip, ip.DefaultMask())
+			if bcast != "" {
+				m.sendBeaconTo(net.ParseIP(bcast), data)
+				sent = true
+			}
+		}
+	}
+
+	// Also send on limited broadcast as fallback
+	if !sent {
+		m.sendBeaconTo(net.IPv4bcast, data)
+	}
+}
+
+// broadcastAddr computes the subnet broadcast address from an IP and mask
+func broadcastAddr(ip net.IP, mask net.IPMask) string {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return ""
+	}
+	// mask is big-endian, broadcast = ip | ~mask
+	bcast := make(net.IP, 4)
+	for i := 0; i < 4; i++ {
+		bcast[i] = ip4[i] | ^mask[i]
+	}
+	return bcast.String()
+}
+
+func (m *MeshDiscovery) sendBeaconTo(bcastIP net.IP, data []byte) {
+	addr := &net.UDPAddr{IP: bcastIP, Port: m.discoveryPort}
 	conn, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
 		return
@@ -378,6 +531,7 @@ func (m *MeshDiscovery) GetDiagnostics() map[string]interface{} {
 		"server_id":      m.serverID,
 		"discovery_port": m.discoveryPort,
 		"server_port":    m.serverPort,
+		"announce_addr":  m.announceAddr,
 		"peers_total":    len(m.peers),
 		"peers_alive":    len(alive),
 		"seed_peers":     getSeedPeers(),
