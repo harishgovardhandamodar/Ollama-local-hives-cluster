@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	serverVersion    = "1.9.0"
+	serverVersion    = "1.9.1"
 	startTime        = time.Now()
 	globalQueue      *OllamaQueue // global reference for streaming
 	globalAuditManager *AuditTrailManager // global audit trail manager

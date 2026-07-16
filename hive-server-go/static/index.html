@@ -129,6 +129,12 @@ tr:hover td{background:rgba(88,166,255,.04)}
 .audit-event-duration{font-size:9px;color:var(--text3);font-family:monospace}
 .audit-event-content-text{font-size:10px;color:var(--text2);line-height:1.5;word-break:break-word;background:var(--bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border);margin-top:4px}
 .audit-event-error{font-size:10px;color:var(--red);background:rgba(248,81,73,.1);padding:6px 8px;border-radius:4px;border:1px solid rgba(248,81,73,.2);margin-top:4px}
+.audit-request-prompt{font-size:9px;color:var(--text2);font-style:italic;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:2}
+.audit-request.highlight-chat{border-left:3px solid var(--accent)}
+.audit-request.highlight-error{border-left:3px solid var(--red)}
+.audit-request.highlight-streaming{border-left:3px solid var(--accent3);animation:pulse-glow 2s ease-in-out infinite}
+.audit-tag.streaming{background:rgba(188,140,255,.15);color:var(--accent3);font-weight:700}
+@keyframes pulse-glow{0%,100%{border-left-color:var(--accent3)}50%{border-left-color:var(--accent)}}
 .tabs{display:flex;gap:0;background:var(--surface2);border-bottom:1px solid var(--border);flex-wrap:wrap;border-radius:12px 12px 0 0}
 .tab-btn{background:none;border:none;padding:8px 14px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent;transition:all .25s}
 .tab-btn:hover{color:var(--text);background:rgba(88,166,255,.04)}
@@ -751,25 +757,36 @@ var auditSearchTimeout=null;
 async function loadAuditTrail(){
   var search=document.getElementById('auditSearch').value;
   var category=document.getElementById('auditCategory').value;
-  var url='/api/audit/recent?limit=100';
+  
+  var url='/api/audit/recent?limit=200';
   if(category)url+='&category='+encodeURIComponent(category);
   
   try{
     var r=await fetch(url).then(function(r){return r.json()});
     var events=r.events||[];
     
-    // Filter by search if provided
+    // Filter out response-only events without useful data, and dashboard polling
+    var filtered=events.filter(function(e){
+      if(e.event_type==='response' && !e.path && !e.model && !e.prompt) return false;
+      return true;
+    });
+    
     if(search){
-      events=events.filter(function(e){
-        var searchLower=search.toLowerCase();
-        return (e.path||'').toLowerCase().includes(searchLower)||
-               (e.model||'').toLowerCase().includes(searchLower)||
-               (e.content||'').toLowerCase().includes(searchLower)||
-               (e.request_id||'').toLowerCase().includes(searchLower);
+      var s=search.toLowerCase();
+      filtered=filtered.filter(function(e){
+        return (e.path||'').toLowerCase().includes(s)||
+               (e.model||'').toLowerCase().includes(s)||
+               (e.content||'').toLowerCase().includes(s)||
+               (e.prompt||'').toLowerCase().includes(s)||
+               (e.query||'').toLowerCase().includes(s)||
+               (e.job_type||'').toLowerCase().includes(s)||
+               (e.error_message||'').toLowerCase().includes(s)||
+               (e.method||'').toLowerCase().includes(s)||
+               (e.request_id||'').toLowerCase().includes(s);
       });
     }
     
-    renderAuditTimeline(events);
+    renderAuditTimeline(filtered);
   }catch(e){
     document.getElementById('auditTimeline').innerHTML='<div class="empty">Failed to load audit trail</div>';
   }
@@ -790,7 +807,12 @@ function renderAuditTimeline(events){
     requests[e.request_id].push(e);
   });
   
+  // Sort: requests with chat completions or errors first, then by most recent
   var requestIds=Object.keys(requests).sort(function(a,b){
+    var aHasImportant=requests[a].some(function(e){return e.path&&e.path.indexOf('/v1/chat')>=0||e.event_type==='error'});
+    var bHasImportant=requests[b].some(function(e){return e.path&&e.path.indexOf('/v1/chat')>=0||e.event_type==='error'});
+    if(aHasImportant&&!bHasImportant) return -1;
+    if(!aHasImportant&&bHasImportant) return 1;
     var lastA=requests[a][requests[a].length-1];
     var lastB=requests[b][requests[b].length-1];
     return new Date(lastB.created_at)-new Date(lastA.created_at);
@@ -803,7 +825,6 @@ function renderAuditTimeline(events){
     var reqEvents=requests[reqId];
     totalEvents+=reqEvents.length;
     
-    // Get request summary
     var firstEvent=reqEvents[0];
     var lastEvent=reqEvents[reqEvents.length-1];
     var durationMs=0;
@@ -811,35 +832,60 @@ function renderAuditTimeline(events){
       durationMs=new Date(lastEvent.created_at)-new Date(firstEvent.created_at);
     }
     
-    // Get event type counts
     var eventCounts={};
     reqEvents.forEach(function(e){
       eventCounts[e.event_type]=(eventCounts[e.event_type]||0)+1;
     });
     
-    // Get unique models and categories
     var models=[];
     var categories=[];
+    var hasError=reqEvents.some(function(e){return e.event_type==='error'||e.error_message;});
+    var isChatCompletion=reqEvents.some(function(e){return e.path&&e.path.indexOf('/v1/chat')>=0;});
+    var isStreaming=reqEvents.some(function(e){return e.event_type==='request'&&reqEvents.length===1;});
+    
     reqEvents.forEach(function(e){
       if(e.model&&models.indexOf(e.model)===-1)models.push(e.model);
       if(e.category&&categories.indexOf(e.category)===-1)categories.push(e.category);
     });
     
-    html+='<div class="audit-request">';
+    var highlightClass='';
+    if(isChatCompletion) highlightClass=' highlight-chat';
+    if(hasError) highlightClass=' highlight-error';
+    if(isStreaming) highlightClass=' highlight-streaming';
+    
+    html+='<div class="audit-request'+highlightClass+'">';
     html+='<div class="audit-request-header" onclick="toggleAuditRequest(this)">';
     html+='<span class="audit-toggle">▶</span>';
-    html+='<span class="audit-request-id">'+esc(reqId)+'</span>';
-    html+='<span class="audit-request-method">'+esc(firstEvent.method||'')+'</span>';
-    html+='<span class="audit-request-path">'+esc(firstEvent.path||'')+'</span>';
+    
+    // Show method badge prominently
+    if(firstEvent.method){
+      html+='<span class="audit-request-method">'+esc(firstEvent.method)+'</span>';
+    }
+    
+    // Show path/model prominently
+    var displayPath=firstEvent.path||reqId;
+    var displayLabel=displayPath;
+    if(models.length) displayLabel+=' ('+esc(models.join(', '))+')';
+    html+='<span class="audit-request-path">'+esc(displayLabel)+'</span>';
+    
     html+='<span class="audit-request-time">'+fmtTime(new Date(firstEvent.created_at).getTime()/1000)+'</span>';
-    html+='<span class="audit-request-duration">'+fmtDuration(durationMs/1000)+'</span>';
-    html+='<span class="audit-request-events">'+reqEvents.length+' event(s)</span>';
+    if(durationMs>0) html+='<span class="audit-request-duration">'+fmtDuration(durationMs/1000)+'</span>';
+    html+='<span class="audit-request-events">'+reqEvents.length+'</span>';
+    
+    // Show prompt preview inline
+    var firstPrompt=reqEvents[0].prompt||'';
+    if(firstPrompt){
+      var preview=firstPrompt.length>60?firstPrompt.substring(0,60)+'...':firstPrompt;
+      html+='<span class="audit-request-prompt">'+esc(preview)+'</span>';
+    }
+    
     html+='</div>';
     
     html+='<div class="audit-request-details" style="display:none">';
     html+='<div class="audit-request-meta">';
     if(categories.length)html+='<span class="audit-tag">'+esc(categories.join(', '))+'</span>';
     if(models.length)html+='<span class="audit-tag model">'+esc(models.join(', '))+'</span>';
+    if(isStreaming)html+='<span class="audit-tag streaming">STREAMING</span>';
     html+='</div>';
     
     html+='<div class="audit-timeline">';

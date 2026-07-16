@@ -378,10 +378,13 @@ func (atm *AuditTrailManager) SearchEvents(searchQuery string, limit int) ([]Aud
 		overrides, duration_ms, token_count, metadata, error_message, created_at
 		FROM request_audit_trail
 		WHERE content LIKE ? OR query LIKE ? OR prompt LIKE ? OR model LIKE ?
+		OR path LIKE ? OR method LIKE ? OR job_type LIKE ? OR error_message LIKE ?
 		ORDER BY created_at DESC LIMIT ?`
 
 	searchPattern := "%" + searchQuery + "%"
-	rows, err := atm.db.db.QueryContext(context.Background(), query, searchPattern, searchPattern, searchPattern, searchPattern, limit)
+	rows, err := atm.db.db.QueryContext(context.Background(), query,
+		searchPattern, searchPattern, searchPattern, searchPattern,
+		searchPattern, searchPattern, searchPattern, searchPattern, limit)
 	if err != nil {
 		return nil, err
 	}

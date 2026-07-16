@@ -188,10 +188,18 @@ func firstNonZero(vals ...int) int {
 
 func auditMiddleware(atm *AuditTrailManager, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip health check and static files from audit
-		if r.URL.Path == "/api/health" || r.URL.Path == "/api/status" ||
-			r.URL.Path == "/metrics" || r.URL.Path == "/api/peers" ||
-			r.URL.Path == "/api/peers/health" || strings.HasPrefix(r.URL.Path, "/static/") {
+		// Skip health check, static files, and high-frequency dashboard polling
+		path := r.URL.Path
+		if path == "/api/health" || path == "/api/status" ||
+			path == "/metrics" || path == "/api/peers" ||
+			path == "/api/peers/health" || strings.HasPrefix(path, "/static/") ||
+			path == "/api/logs" || path == "/api/logs/clear" ||
+			path == "/api/clients" || path == "/version" ||
+			(path == "/api/reports/usage" && r.Method == "GET") ||
+			(path == "/api/reports/usage/timeseries" && r.Method == "GET") ||
+			(path == "/api/reports/usage/histogram" && r.Method == "GET") ||
+			(path == "/api/reports/usage/recent" && r.Method == "GET") ||
+			(path == "/api/ollama/health" && r.Method == "GET") {
 			next.ServeHTTP(w, r)
 			return
 		}
