@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -59,7 +61,57 @@ func (s *DBStore) migrate() error {
 		created_at REAL NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage(created_at);
-	CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(provider, model);`
+	CREATE INDEX IF NOT EXISTS idx_token_usage_model ON token_usage(provider, model);
+
+	CREATE TABLE IF NOT EXISTS coding_agent_sessions (
+		id TEXT PRIMARY KEY,
+		agent_type TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		token_budget INTEGER NOT NULL DEFAULT 32000,
+		status TEXT NOT NULL DEFAULT 'active',
+		system_prompt TEXT NOT NULL DEFAULT '',
+		metadata TEXT NOT NULL DEFAULT '{}',
+		created_at REAL NOT NULL,
+		updated_at REAL NOT NULL,
+		total_messages INTEGER NOT NULL DEFAULT 0,
+		total_tokens INTEGER NOT NULL DEFAULT 0,
+		compressions INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX IF NOT EXISTS idx_ca_sessions_agent ON coding_agent_sessions(agent_type);
+	CREATE INDEX IF NOT EXISTS idx_ca_sessions_status ON coding_agent_sessions(status);
+	CREATE INDEX IF NOT EXISTS idx_ca_sessions_created ON coding_agent_sessions(created_at);
+
+	CREATE TABLE IF NOT EXISTS coding_agent_messages (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		role TEXT NOT NULL,
+		content TEXT NOT NULL,
+		token_count INTEGER NOT NULL DEFAULT 0,
+		compress_group INTEGER NOT NULL DEFAULT 0,
+		is_summary INTEGER NOT NULL DEFAULT 0,
+		metadata TEXT NOT NULL DEFAULT '{}',
+		created_at REAL NOT NULL,
+		FOREIGN KEY (session_id) REFERENCES coding_agent_sessions(id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_ca_msgs_session ON coding_agent_messages(session_id);
+	CREATE INDEX IF NOT EXISTS idx_ca_msgs_created ON coding_agent_messages(created_at);
+	CREATE INDEX IF NOT EXISTS idx_ca_msgs_role ON coding_agent_messages(role);
+
+	CREATE TABLE IF NOT EXISTS coding_agent_audit (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id TEXT NOT NULL,
+		agent_type TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL,
+		content TEXT NOT NULL,
+		token_count INTEGER NOT NULL DEFAULT 0,
+		compress_group INTEGER NOT NULL DEFAULT 0,
+		is_summary INTEGER NOT NULL DEFAULT 0,
+		created_at REAL NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_ca_audit_session ON coding_agent_audit(session_id);
+	CREATE INDEX IF NOT EXISTS idx_ca_audit_created ON coding_agent_audit(created_at);
+	CREATE INDEX IF NOT EXISTS idx_ca_audit_agent ON coding_agent_audit(agent_type);`
 	_, err := s.db.ExecContext(context.Background(), query)
 	return err
 }
@@ -359,6 +411,287 @@ func (s *DBStore) Prune(maxAge float64) error {
 
 func (s *DBStore) Close() error {
 	return s.db.Close()
+}
+
+// Coding Agent CRUD methods
+
+func (s *DBStore) InsertCodingAgentSession(session *CodingAgentSession) error {
+	metadataJSON := "{}"
+	if session.Metadata != nil {
+		md, _ := json.Marshal(session.Metadata)
+		metadataJSON = string(md)
+	}
+	query := `INSERT INTO coding_agent_sessions
+		(id, agent_type, model, token_budget, status, system_prompt, metadata,
+		 created_at, updated_at, total_messages, total_tokens, compressions)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(context.Background(), query,
+		session.ID, session.AgentType, session.Model, session.TokenBudget,
+		session.Status, session.SystemPrompt, metadataJSON,
+		session.CreatedAt, session.UpdatedAt, session.TotalMessages,
+		session.TotalTokens, session.Compressions)
+	return err
+}
+
+func (s *DBStore) GetCodingAgentSession(id string) (*CodingAgentSession, error) {
+	query := `SELECT id, agent_type, model, token_budget, status, system_prompt, metadata,
+		created_at, updated_at, total_messages, total_tokens, compressions
+		FROM coding_agent_sessions WHERE id = ?`
+	var session CodingAgentSession
+	var metadataJSON string
+	err := s.db.QueryRowContext(context.Background(), query, id).Scan(
+		&session.ID, &session.AgentType, &session.Model, &session.TokenBudget,
+		&session.Status, &session.SystemPrompt, &metadataJSON,
+		&session.CreatedAt, &session.UpdatedAt, &session.TotalMessages,
+		&session.TotalTokens, &session.Compressions)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if metadataJSON != "" && metadataJSON != "{}" {
+		json.Unmarshal([]byte(metadataJSON), &session.Metadata)
+	}
+	return &session, nil
+}
+
+func (s *DBStore) ListCodingAgentSessions(agentType string) ([]*CodingAgentSession, error) {
+	query := `SELECT id, agent_type, model, token_budget, status, system_prompt, metadata,
+		created_at, updated_at, total_messages, total_tokens, compressions
+		FROM coding_agent_sessions`
+	args := []interface{}{}
+	if agentType != "" {
+		query += ` WHERE agent_type = ?`
+		args = append(args, agentType)
+	}
+	query += ` ORDER BY created_at DESC LIMIT 200`
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var sessions []*CodingAgentSession
+	for rows.Next() {
+		var session CodingAgentSession
+		var metadataJSON string
+		if err := rows.Scan(
+			&session.ID, &session.AgentType, &session.Model, &session.TokenBudget,
+			&session.Status, &session.SystemPrompt, &metadataJSON,
+			&session.CreatedAt, &session.UpdatedAt, &session.TotalMessages,
+			&session.TotalTokens, &session.Compressions); err != nil {
+			continue
+		}
+		if metadataJSON != "" && metadataJSON != "{}" {
+			json.Unmarshal([]byte(metadataJSON), &session.Metadata)
+		}
+		sessions = append(sessions, &session)
+	}
+	return sessions, rows.Err()
+}
+
+func (s *DBStore) UpdateCodingAgentSession(session *CodingAgentSession) error {
+	query := `UPDATE coding_agent_sessions SET
+		status = ?, total_messages = ?, total_tokens = ?, compressions = ?, updated_at = ?
+		WHERE id = ?`
+	_, err := s.db.ExecContext(context.Background(), query,
+		session.Status, session.TotalMessages, session.TotalTokens,
+		session.Compressions, session.UpdatedAt, session.ID)
+	return err
+}
+
+func (s *DBStore) DeleteCodingAgentSession(id string) error {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(context.Background(),
+		`DELETE FROM coding_agent_messages WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		`DELETE FROM coding_agent_audit WHERE session_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		`DELETE FROM coding_agent_sessions WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Coding Agent Messages CRUD
+
+func (s *DBStore) InsertCodingAgentMessage(msg *CodingAgentMessage) error {
+	isSummary := 0
+	if msg.IsSummary {
+		isSummary = 1
+	}
+	if msg.MetadataJSON == "" {
+		msg.MetadataJSON = "{}"
+	}
+	query := `INSERT INTO coding_agent_messages
+		(id, session_id, role, content, token_count, compress_group, is_summary, metadata, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(context.Background(), query,
+		msg.ID, msg.SessionID, msg.Role, msg.Content, msg.TokenCount,
+		msg.CompressGroup, isSummary, msg.MetadataJSON, msg.CreatedAt)
+	return err
+}
+
+func (s *DBStore) GetCodingAgentMessages(sessionID string, limit int) ([]*CodingAgentMessage, error) {
+	query := `SELECT id, session_id, role, content, token_count, compress_group, is_summary, metadata, created_at
+		FROM coding_agent_messages WHERE session_id = ? ORDER BY created_at ASC`
+	args := []interface{}{sessionID}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*CodingAgentMessage
+	for rows.Next() {
+		var msg CodingAgentMessage
+		var isSummary int
+		if err := rows.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content,
+			&msg.TokenCount, &msg.CompressGroup, &isSummary, &msg.MetadataJSON, &msg.CreatedAt); err != nil {
+			continue
+		}
+		msg.IsSummary = isSummary == 1
+		msgs = append(msgs, &msg)
+	}
+	return msgs, rows.Err()
+}
+
+func (s *DBStore) CompressCodingAgentMessages(sessionID string, splitIdx int, summaryContent string, compressGroup int) error {
+	msgs, err := s.GetCodingAgentMessages(sessionID, 0)
+	if err != nil {
+		return err
+	}
+
+	if splitIdx > len(msgs) {
+		splitIdx = len(msgs)
+	}
+	if splitIdx <= 1 {
+		return nil // don't remove system message
+	}
+
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Delete old messages (keep system message at index 0 and recent messages)
+	for i := 1; i < splitIdx; i++ {
+		if _, err := tx.ExecContext(context.Background(),
+			`DELETE FROM coding_agent_messages WHERE id = ?`, msgs[i].ID); err != nil {
+			return err
+		}
+	}
+
+	// Insert summary message
+	summaryMsg := &CodingAgentMessage{
+		ID:           fmt.Sprintf("msg-%s-summary-%d", sessionID, time.Now().UnixMilli()),
+		SessionID:    sessionID,
+		Role:         "system",
+		Content:      summaryContent,
+		TokenCount:   estimateTokens(summaryContent),
+		CompressGroup: compressGroup,
+		IsSummary:    true,
+		MetadataJSON: `{"type":"context_summary"}`,
+		CreatedAt:    now(),
+	}
+	if _, err := tx.ExecContext(context.Background(),
+		`INSERT INTO coding_agent_messages (id, session_id, role, content, token_count, compress_group, is_summary, metadata, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		summaryMsg.ID, summaryMsg.SessionID, summaryMsg.Role, summaryMsg.Content,
+		summaryMsg.TokenCount, summaryMsg.CompressGroup, 1, summaryMsg.MetadataJSON, summaryMsg.CreatedAt); err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// Coding Agent Audit Log
+
+func (s *DBStore) InsertCodingAgentAuditEntry(entry *CodingAgentAuditEntry) error {
+	isSummary := 0
+	if entry.IsSummary {
+		isSummary = 1
+	}
+	query := `INSERT INTO coding_agent_audit
+		(session_id, agent_type, model, role, content, token_count, compress_group, is_summary, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	_, err := s.db.ExecContext(context.Background(), query,
+		entry.SessionID, entry.AgentType, entry.Model, entry.Role,
+		entry.Content, entry.TokenCount, entry.CompressGroup, isSummary, entry.CreatedAt)
+	return err
+}
+
+func (s *DBStore) GetCodingAgentAuditLogs(sessionID string, limit int) ([]*CodingAgentAuditEntry, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := `SELECT id, session_id, agent_type, model, role, content, token_count, compress_group, is_summary, created_at
+		FROM coding_agent_audit WHERE session_id = ? ORDER BY id DESC LIMIT ?`
+
+	rows, err := s.db.QueryContext(context.Background(), query, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*CodingAgentAuditEntry
+	for rows.Next() {
+		var entry CodingAgentAuditEntry
+		var isSummary int
+		if err := rows.Scan(&entry.ID, &entry.SessionID, &entry.AgentType, &entry.Model,
+			&entry.Role, &entry.Content, &entry.TokenCount, &entry.CompressGroup,
+			&isSummary, &entry.CreatedAt); err != nil {
+			continue
+		}
+		entry.IsSummary = isSummary == 1
+		entries = append(entries, &entry)
+	}
+	return entries, rows.Err()
+}
+
+func (s *DBStore) SearchCodingAgentMessages(query string, limit int) ([]*CodingAgentMessage, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	q := `SELECT id, session_id, role, content, token_count, compress_group, is_summary, metadata, created_at
+		FROM coding_agent_messages WHERE content LIKE ? ORDER BY created_at DESC LIMIT ?`
+	searchPattern := "%" + query + "%"
+
+	rows, err := s.db.QueryContext(context.Background(), q, searchPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*CodingAgentMessage
+	for rows.Next() {
+		var msg CodingAgentMessage
+		var isSummary int
+		if err := rows.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content,
+			&msg.TokenCount, &msg.CompressGroup, &isSummary, &msg.MetadataJSON, &msg.CreatedAt); err != nil {
+			continue
+		}
+		msg.IsSummary = isSummary == 1
+		msgs = append(msgs, &msg)
+	}
+	return msgs, rows.Err()
 }
 
 func detectServingType() string {

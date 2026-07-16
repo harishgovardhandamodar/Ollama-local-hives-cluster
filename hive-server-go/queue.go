@@ -152,6 +152,8 @@ func (q *OllamaQueue) executeJob(job *Job) {
 		result, err = q.callOllamaGenerate(job.PayloadMap)
 	case "chat":
 		result, err = q.callOllamaChat(job.PayloadMap)
+	case "coding_agent_chat":
+		result, err = q.callOllamaChatPayload(job.PayloadMap)
 	case "embed", "get_embedding":
 		result, err = q.callOllamaEmbed(job.PayloadMap)
 	case "list_models":
@@ -248,6 +250,18 @@ func (q *OllamaQueue) callOllamaChat(payload map[string]interface{}) (interface{
 		"model":    model,
 		"messages": messages,
 		"stream":   stream,
+	}
+	return q.postOllama("/api/chat", body)
+}
+
+// callOllamaChatPayload sends a pre-built chat payload directly to Ollama /api/chat
+// Used by coding_agent_chat jobs where the payload is already in the correct format
+func (q *OllamaQueue) callOllamaChatPayload(payload map[string]interface{}) (interface{}, error) {
+	// Payload already has model, messages, stream in the right shape
+	body := map[string]interface{}{
+		"model":    payload["model"],
+		"messages": payload["messages"],
+		"stream":   false,
 	}
 	return q.postOllama("/api/chat", body)
 }

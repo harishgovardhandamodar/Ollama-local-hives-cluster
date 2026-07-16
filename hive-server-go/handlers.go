@@ -12,16 +12,17 @@ import (
 )
 
 var (
-	serverVersion = "1.6.0"
+	serverVersion = "1.7.0"
 	startTime     = time.Now()
 )
 
 type HiveServer struct {
-	queue    *OllamaQueue
-	mesh     *MeshDiscovery
-	clients  *ClientManager
-	cfg      ServerConfig
-	provider *ProviderManager
+	queue        *OllamaQueue
+	mesh         *MeshDiscovery
+	clients      *ClientManager
+	cfg          ServerConfig
+	provider     *ProviderManager
+	codingAgent  *CodingAgentManager
 }
 
 type ClientManager struct {
@@ -147,12 +148,19 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 		cfg.OllamaURL,
 		cfg.CustomProviderURLs,
 	)
+
+	var cam *CodingAgentManager
+	if defaultDB != nil {
+		cam = NewCodingAgentManager(defaultDB, queue)
+	}
+
 	return &HiveServer{
-		queue:    queue,
-		mesh:     mesh,
-		clients:  NewClientManager(cfg.MaxClients),
-		cfg:      cfg,
-		provider: provider,
+		queue:       queue,
+		mesh:        mesh,
+		clients:     NewClientManager(cfg.MaxClients),
+		cfg:         cfg,
+		provider:    provider,
+		codingAgent: cam,
 	}
 }
 
@@ -223,6 +231,24 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/reports/usage/recent", hs.handleUsageRecent)
 	mux.HandleFunc("/api/reports/usage/timeseries", hs.handleUsageTimeSeries)
 	mux.HandleFunc("/api/reports/usage/histogram", hs.handleUsageHistogram)
+
+	// Coding Agent API
+	mux.HandleFunc("POST /api/agent/sessions", hs.handleAgentSessionCreate)
+	mux.HandleFunc("GET /api/agent/sessions", hs.handleAgentSessionList)
+	mux.HandleFunc("GET /api/agent/sessions/{session_id}", hs.handleAgentSessionGet)
+	mux.HandleFunc("DELETE /api/agent/sessions/{session_id}", hs.handleAgentSessionDelete)
+	mux.HandleFunc("POST /api/agent/sessions/{session_id}/archive", hs.handleAgentSessionArchive)
+	mux.HandleFunc("POST /api/agent/sessions/{session_id}/messages", hs.handleAgentMessageSend)
+	mux.HandleFunc("GET /api/agent/sessions/{session_id}/messages", hs.handleAgentMessagesGet)
+	mux.HandleFunc("GET /api/agent/sessions/{session_id}/context", hs.handleAgentContextStats)
+	mux.HandleFunc("GET /api/agent/sessions/{session_id}/audit", hs.handleAgentAuditLogs)
+	mux.HandleFunc("GET /api/agent/search", hs.handleAgentSearch)
+	mux.HandleFunc("GET /api/agent/models", hs.handleAgentModels)
+
+	// OpenAI-compatible API (for Hermes, Codex, OpenCode, etc.)
+	mux.HandleFunc("POST /v1/chat/completions", hs.handleOpenAIChatCompletions)
+	mux.HandleFunc("GET /v1/models", hs.handleOpenAIListModels)
+	mux.HandleFunc("GET /v1/health", hs.handleOpenAIHealth)
 }
 
 func (hs *HiveServer) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -782,4 +808,302 @@ func splitAndTrim(s, sep string) []string {
 		}
 	}
 	return result
+}
+
+// Coding Agent API handlers
+
+func (hs *HiveServer) handleAgentSessionCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available (no database)"}`, http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		AgentType    string                 `json:"agent_type"`
+		Model        string                 `json:"model"`
+		SystemPrompt string                 `json:"system_prompt"`
+		TokenBudget  int                    `json:"token_budget"`
+		Metadata     map[string]interface{} `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.AgentType == "" {
+		body.AgentType = AgentTypeCustom
+	}
+
+	session, detected, err := hs.codingAgent.CreateSession(body.AgentType, body.Model, body.SystemPrompt, body.TokenBudget, body.Metadata)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"session":        session,
+		"model_context":  detected,
+	})
+}
+
+func (hs *HiveServer) handleAgentSessionList(w http.ResponseWriter, r *http.Request) {
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	agentType := r.URL.Query().Get("agent_type")
+	sessions, err := hs.codingAgent.ListSessions(agentType)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"sessions": sessions,
+		"count":    len(sessions),
+	})
+}
+
+func (hs *HiveServer) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	session, err := hs.codingAgent.GetSession(sessionID)
+	if err != nil || session == nil {
+		http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, session)
+}
+
+func (hs *HiveServer) handleAgentSessionDelete(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if err := hs.codingAgent.DeleteSession(sessionID); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "deleted", "session_id": sessionID})
+}
+
+func (hs *HiveServer) handleAgentSessionArchive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	if err := hs.codingAgent.ArchiveSession(sessionID); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "archived", "session_id": sessionID})
+}
+
+func (hs *HiveServer) handleAgentMessageSend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		Role     string                 `json:"role"`
+		Content  string                 `json:"content"`
+		Metadata map[string]interface{} `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+	if body.Role == "" {
+		body.Role = "user"
+	}
+	if body.Content == "" {
+		http.Error(w, "content required", http.StatusBadRequest)
+		return
+	}
+
+	response, session, err := hs.codingAgent.SendMessage(sessionID, body.Role, body.Content, body.Metadata)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"session_id": sessionID,
+		"response":   response,
+		"agent_type": session.AgentType,
+		"model":      session.Model,
+		"total_tokens": session.TotalTokens,
+		"token_budget": session.TokenBudget,
+		"compressions": session.Compressions,
+	})
+}
+
+func (hs *HiveServer) handleAgentMessagesGet(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	limit := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	msgs, err := hs.codingAgent.GetMessages(sessionID, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"session_id": sessionID,
+		"messages":   msgs,
+		"count":      len(msgs),
+	})
+}
+
+func (hs *HiveServer) handleAgentContextStats(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	stats, err := hs.codingAgent.GetContextStats(sessionID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, stats)
+}
+
+func (hs *HiveServer) handleAgentAuditLogs(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.PathValue("session_id")
+	if sessionID == "" {
+		http.Error(w, "session_id required", http.StatusBadRequest)
+		return
+	}
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	limit := 500
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	logs, err := hs.codingAgent.GetAuditLogs(sessionID, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"session_id": sessionID,
+		"audit_logs": logs,
+		"count":      len(logs),
+	})
+}
+
+func (hs *HiveServer) handleAgentSearch(w http.ResponseWriter, r *http.Request) {
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "q parameter required", http.StatusBadRequest)
+		return
+	}
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	msgs, err := hs.codingAgent.SearchMessages(query, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"query":    query,
+		"messages": msgs,
+		"count":    len(msgs),
+	})
+}
+
+func (hs *HiveServer) handleAgentModels(w http.ResponseWriter, r *http.Request) {
+	if hs.codingAgent == nil {
+		http.Error(w, `{"error":"coding agent not available"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get models from the registry
+	registryModels := GetAllKnownModels()
+
+	// Also try to query live models from Ollama
+	var liveModels []map[string]interface{}
+	if hs.cfg.OllamaURL != "" {
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get(hs.cfg.OllamaURL + "/api/tags")
+		if err == nil {
+			defer resp.Body.Close()
+			var result struct {
+				Models []struct {
+					Name string `json:"name"`
+					Size int64  `json:"size"`
+				} `json:"models"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&result) == nil {
+				for _, m := range result.Models {
+					detected := hs.codingAgent.detector.DetectContextWindow(m.Name)
+					budget := hs.codingAgent.detector.GetContextBudgetForModel(m.Name, 0)
+					liveModels = append(liveModels, map[string]interface{}{
+						"name":            m.Name,
+						"context_length":  detected.ContextLength,
+						"recommended_budget": budget,
+						"detection_source":   detected.Source,
+						"size_gb":            fmt.Sprintf("%.1f", float64(m.Size)/1e9),
+					})
+				}
+			}
+		}
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"live_models": liveModels,
+		"registry":    registryModels,
+	})
 }
