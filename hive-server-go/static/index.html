@@ -431,7 +431,7 @@ function renderStats(s){
   var q=s.queue||{};
   document.getElementById('stats').innerHTML='<div class="stat-box blue"><div class="num">'+(q.max_concurrent||0)+'</div><div class="lbl">Workers</div></div><div class="stat-box orange"><div class="num">'+(q.pending||0)+'</div><div class="lbl">Queued</div></div><div class="stat-box blue"><div class="num">'+(q.running||0)+'</div><div class="lbl">Running</div></div><div class="stat-box green"><div class="num">'+(q.completed_recent||0)+'</div><div class="lbl">Done (1h)</div></div><div class="stat-box"><div class="num">'+(s.clients||0)+'/'+(s.max_clients||0)+'</div><div class="lbl">Clients</div></div><div class="stat-box purple"><div class="num">'+(s.peers||0)+'</div><div class="lbl">Peers</div></div>';
   document.getElementById('ollamaInfo').textContent='Ollama: '+(s.ollama_url||'');
-  document.getElementById('modelInfo').textContent=s.ollama_model||'';
+  getServerIPs().then(function(ips){document.getElementById('modelInfo').textContent=ips;});
   document.getElementById('serverId').textContent=s.server_id||'';
   document.getElementById('versionBadge').textContent='v'+(s.version||'1.0.0');
   document.getElementById('ollamaDot').className='status-dot '+(s.queue?'ok':'err');
@@ -1020,6 +1020,7 @@ function toggleAuditRequest(el){
 function fmtDuration(s){s=Math.abs(s);if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m '+Math.round(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}
 function fmtTime(epoch){var d=new Date(epoch*1000);return ('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+async function getServerIPs(){try{var r=await fetch('/api/peers/diagnostics').then(function(r){return r.json()});return r.announce_addr||r.server_id||window.location.host;}catch(e){return window.location.host;}}
 function setLogFilter(level){
   logFilter=level;
   document.querySelectorAll('.log-filter').forEach(function(el){
