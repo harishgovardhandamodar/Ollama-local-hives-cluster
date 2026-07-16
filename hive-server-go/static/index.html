@@ -7,6 +7,18 @@
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :root{--bg:#0a0c10;--surface:#12141a;--surface2:#1a1d27;--border:#262933;--border-light:#30333f;--text:#e4e6ed;--text2:#9ba0b0;--text3:#6b7084;--accent:#58a6ff;--accent2:#39d2c0;--accent3:#bc8cff;--green:#2ea043;--orange:#f0883e;--red:#f85149;--grad1:linear-gradient(135deg,#58a6ff,#39d2c0);--grad2:linear-gradient(135deg,#bc8cff,#58a6ff);--grad3:linear-gradient(135deg,#f0883e,#f85149);--shadow:0 2px 16px rgba(0,0,0,.3);--glow-blue:0 0 20px rgba(88,166,255,.15);--glow-green:0 0 20px rgba(46,160,67,.15)}
+.light-theme{--bg:#f6f8fa;--surface:#ffffff;--surface2:#eef1f5;--border:#d0d7de;--border-light:#afb8c1;--text:#1f2328;--text2:#656d76;--text3:#656d76;--accent:#0969da;--accent2:#1a7f37;--accent3:#8250df;--green:#1a7f37;--orange:#9a6700;--red:#cf222e;--grad1:linear-gradient(135deg,#0969da,#1a7f37);--grad2:linear-gradient(135deg,#8250df,#0969da);--grad3:linear-gradient(135deg,#9a6700,#cf222e);--shadow:0 2px 16px rgba(31,35,40,.12);--glow-blue:0 0 20px rgba(9,105,218,.1);--glow-green:0 0 20px rgba(26,127,55,.08)}
+.light-theme .header{background:rgba(255,255,255,.9)}
+.light-theme body::before{background:radial-gradient(ellipse at 20% 30%,rgba(9,105,218,.03) 0%,transparent 50%),radial-gradient(ellipse at 80% 70%,rgba(26,127,55,.02) 0%,transparent 50%)}
+.light-theme .audit-request{background:var(--surface)}
+.light-theme .audit-request-header:hover{background:rgba(9,105,218,.04)}
+.light-theme .audit-request{margin-bottom:6px}
+.light-theme .audit-event-content-text{background:var(--surface2)}
+.light-theme .overlay-content{background:var(--surface)}
+.light-theme .overlay-header{background:var(--surface)}
+.theme-toggle{font-size:14px;cursor:pointer;padding:2px 6px;border-radius:6px;transition:all .2s;background:var(--surface2);border:1px solid var(--border);line-height:1;display:flex;align-items:center}
+.theme-toggle:hover{background:var(--border);border-color:var(--border-light);transform:scale(1.1)}
+.light-theme .theme-toggle{background:var(--surface);border-color:var(--border)}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow:hidden}
 body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 20% 30%,rgba(88,166,255,.04) 0%,transparent 50%),radial-gradient(ellipse at 80% 70%,rgba(57,210,192,.03) 0%,transparent 50%),radial-gradient(ellipse at 50% 50%,rgba(188,140,255,.02) 0%,transparent 50%);pointer-events:none;z-index:0}
 .header{position:relative;z-index:1;background:rgba(18,20,26,.85);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
@@ -247,8 +259,9 @@ select option{background:var(--surface);color:var(--text)}
   <div class="status-dot ok" id="ollamaDot"></div>
   <h1>Hive Server Go</h1>
   <span class="badge" id="versionBadge">v1.7.0</span>
-  <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
-  <div class="meta">
+    <span class="badge mesh" id="meshBadge" style="display:none">MESH</span>
+    <span class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">🌙</span>
+    <div class="meta">
     <span id="serverId"></span>
     <span id="ollamaInfo">Ollama: checking...</span>
     <span id="modelInfo"></span>
@@ -1098,6 +1111,19 @@ function initDivider(){
 initDivider();initTabs();refresh();sideRefresh();
 setInterval(refresh,3000);setInterval(loadJobs,5000);setInterval(sideRefresh,6000);
 pollLogs();
+
+// Theme toggle
+var _theme=localStorage.getItem('hiveTheme')||'dark';
+function initTheme(){
+  if(_theme==='light'){document.documentElement.classList.add('light-theme');document.getElementById('themeToggle').textContent='☀️';}
+}
+function toggleTheme(){
+  _theme=_theme==='dark'?'light':'dark';
+  document.documentElement.classList.toggle('light-theme',_theme==='light');
+  document.getElementById('themeToggle').textContent=_theme==='light'?'☀️':'🌙';
+  localStorage.setItem('hiveTheme',_theme);
+}
+initTheme();
 
 // Audit Trail Overlay Functions
 var _ovDetail=null;
