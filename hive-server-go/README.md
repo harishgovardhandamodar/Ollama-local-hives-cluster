@@ -10,6 +10,7 @@ A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and 
 - **Coding Agent API** — Session-based context management, auto-compression, audit logging for Hermes/OpenCode/Codex
 - **Auto-Forwarding** — When a model isn't found locally, requests are automatically forwarded to the peer that has it
 - **Enterprise Security** — API key authentication, rate limiting, structured JSON logging
+- **Audit Trail** — Every request captured with full lifecycle, prompt, model, timing. Viewable as dashboard timeline overlay with expandable event graph
 - **Response Cache** — Prompt-hash based caching with configurable TTL for repeated queries
 - **Metrics** — Prometheus-compatible `/metrics` endpoint with counters, gauges, and histograms
 - **Live Dashboard** — Real-time stats, queue, mesh topology, token usage charts, live logs
@@ -355,7 +356,127 @@ Session-based interface for coding agents with context management and audit logg
 
 ### Dashboard
 
-**`GET /`** — Live dashboard with stats, queue, mesh topology, token usage charts, live logs.
+**`GET /`** — Live dashboard with stats, queue, mesh topology, token usage charts, live logs, and **Audit Trail** tab.
+
+### Audit Trail
+
+Every request to the server is captured with full request/response lifecycle, prompt, model, and timing data. The audit trail is stored in SQLite and viewable via API or the dashboard's **Audit Trail** tab.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/audit/recent` | GET | Recent audit events (with category filter) |
+| `/api/audit/search` | GET | Full-text search across prompts, models, paths |
+| `/api/audit/timeline/{request_id}` | GET | Event timeline for a specific request |
+| `/api/audit/summary/{request_id}` | GET | Summary with duration & event counts |
+| `/api/audit/detail/{request_id}` | GET | Full detail: request body, response, timeline |
+
+#### Recent Events
+
+```sh
+curl "http://localhost:8081/api/audit/recent?limit=20&category=coding_agent"
+```
+
+```json
+{
+  "events": [
+    {
+      "id": 2886,
+      "request_id": "req_1784220418094_00808808",
+      "event_type": "request",
+      "category": "openai_compat",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "model": "gemma4:31b-mlx",
+      "prompt": "[System: The active model...]",
+      "overrides": {"model": "gemma4:31b-mlx", "messages": [...]},
+      "created_at": "2026-07-16T18:46:58+02:00"
+    }
+  ],
+  "count": 1
+}
+```
+
+#### Request Detail (Overlay)
+
+```sh
+curl "http://localhost:8081/api/audit/detail/req_xxx"
+```
+
+```json
+{
+  "request_id": "req_xxx",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "model": "llama3.1:8b",
+  "prompt": "Say hi in 3 words",
+  "status_code": 200,
+  "token_count": 25,
+  "total_duration_ms": 5000,
+  "total_events": 2,
+  "response_content": "Hello!",
+  "events": [
+    {
+      "event_type": "request",
+      "model": "llama3.1:8b",
+      "prompt": "Say hi in 3 words",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "created_at": "..."
+    },
+    {
+      "event_type": "response",
+      "content": "Hello!",
+      "status_code": 200,
+      "duration_ms": 5000
+    }
+  ]
+}
+```
+
+#### Search
+
+```sh
+curl "http://localhost:8081/api/audit/search?q=gemma4&limit=10"
+```
+
+Searches across: `prompt`, `model`, `path`, `method`, `content`, `query`, `job_type`, `error_message`.
+
+#### Dashboard Timeline View
+
+The **Audit Trail** tab on the dashboard:
+- Groups events by `request_id`, sorted with important requests first (chat completions, errors)
+- Shows method badge, path, model, prompt preview, duration
+- Click the request body area → opens **detail overlay** with full request JSON, response content, and expandable event timeline
+- Active streaming requests highlighted with pulsing purple border
+- Inline toggle (▶/▼) shows brief event summary without opening the overlay
+- Category filter: Coding Agent, OpenAI Compat, Job Queue, Mesh, System
+- Free-text search filters in real-time
+
+#### Captured Data
+
+| Field | Description |
+|-------|-------------|
+| `request_id` | Unique per-request identifier (`req_{timestamp}_{hex}`) |
+| `prompt` | Extracted from body `prompt`, `messages[last].content`, or nested `payload` |
+| `model` | Model name from the request body |
+| `overrides` | Full original request body (all parameters) |
+| `event_type` | `request`, `response`, `error`, `forward`, `cache_hit`, `job_complete`, `job_error` |
+| `category` | `coding_agent`, `openai_compat`, `job_queue`, `mesh`, `system` |
+| `duration_ms` | Request-response duration in milliseconds |
+| `token_count` | Total tokens used (from completion response) |
+| `status_code` | HTTP status code of the response |
+
+#### Data Persistence
+
+Audit trail data is stored in the SQLite database at `./hive-server.db` (configurable via `HIVE_DB_PATH`). Data persists across server restarts. The database can be backed up, copied, or inspected with any SQLite tool:
+
+```sh
+sqlite3 hive-server.db "SELECT COUNT(*) FROM request_audit_trail"
+sqlite3 hive-server.db "SELECT event_type, path, model, datetime(created_at, 'unixepoch')
+  FROM request_audit_trail ORDER BY created_at DESC LIMIT 10"
+```
+
+High-frequency dashboard polling endpoints (`/api/logs`, `/api/clients`, `/api/status`, `/api/reports/*`, `/api/ollama/health`) are excluded from audit logging to avoid noise.
 
 ## Mesh Discovery
 
