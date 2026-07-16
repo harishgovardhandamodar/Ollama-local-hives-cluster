@@ -135,6 +135,38 @@ tr:hover td{background:rgba(88,166,255,.04)}
 .audit-request.highlight-streaming{border-left:3px solid var(--accent3);animation:pulse-glow 2s ease-in-out infinite}
 .audit-tag.streaming{background:rgba(188,140,255,.15);color:var(--accent3);font-weight:700}
 @keyframes pulse-glow{0%,100%{border-left-color:var(--accent3)}50%{border-left-color:var(--accent)}}
+
+/* Overlay Modal */
+.overlay{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:20px}
+.overlay.active{display:flex}
+.overlay-content{background:var(--surface);border:1px solid var(--border);border-radius:12px;width:90%;max-width:900px;max-height:85vh;overflow-y:auto;position:relative;box-shadow:0 8px 40px rgba(0,0,0,.5)}
+.overlay-close{position:absolute;top:12px;right:16px;font-size:18px;color:var(--text3);cursor:pointer;background:none;border:none;z-index:2;padding:4px 8px;border-radius:4px;transition:all .2s}
+.overlay-close:hover{color:var(--text);background:var(--surface2)}
+.overlay-header{padding:20px 24px 16px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);z-index:1;border-radius:12px 12px 0 0}
+.overlay-header h2{font-size:14px;color:var(--text);margin-bottom:6px}
+.overlay-header .meta{display:flex;gap:10px;flex-wrap:wrap;font-size:10px;color:var(--text3)}
+.overlay-header .meta span{display:flex;align-items:center;gap:4px}
+.overlay-body{padding:20px 24px 24px}
+
+.overlay-section{margin-bottom:20px}
+.overlay-section h3{font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.overlay-section .content-block{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:11px;color:var(--text2);line-height:1.6;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+.overlay-section .content-block::-webkit-scrollbar{width:4px}
+.overlay-section .content-block::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+/* Timeline in Overlay */
+.overlay-timeline{position:relative;padding-left:28px;margin-top:8px}
+.overlay-timeline-event{position:relative;padding:0 0 20px 0}
+.overlay-timeline-event:last-child{padding-bottom:0}
+.overlay-timeline-event:last-child .ov-tl-line{display:none}
+.ov-tl-dot{position:absolute;left:-28px;top:4px;width:12px;height:12px;border-radius:50%;z-index:1;display:flex;align-items:center;justify-content:center;font-size:7px}
+.ov-tl-line{position:absolute;left:-23px;top:16px;width:2px;height:calc(100% - 4px);background:var(--border)}
+.ov-tl-expand{font-size:9px;padding:2px 8px;border-radius:4px;cursor:pointer;color:var(--accent);background:rgba(88,166,255,.1);border:1px solid transparent;transition:all .2s;display:inline-flex;align-items:center;gap:4px;margin-top:4px}
+.ov-tl-expand:hover{background:rgba(88,166,255,.2)}
+.ov-tl-body{display:none;margin-top:8px;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-family:monospace;font-size:10px;color:var(--text2);line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto}
+.ov-tl-stats{display:flex;gap:12px;flex-wrap:wrap;font-size:10px;color:var(--text3);margin-top:4px}
+.ov-tl-stats span{display:flex;align-items:center;gap:3px}
+.ov-tl-icon{font-size:12px;margin-right:4px}
 .tabs{display:flex;gap:0;background:var(--surface2);border-bottom:1px solid var(--border);flex-wrap:wrap;border-radius:12px 12px 0 0}
 .tab-btn{background:none;border:none;padding:8px 14px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent;transition:all .25s}
 .tab-btn:hover{color:var(--text);background:rgba(88,166,255,.04)}
@@ -333,6 +365,30 @@ select option{background:var(--surface);color:var(--text)}
         <button onclick="clearLogs()">Clear</button>
       </div>
       <div class="log-panel" id="logPanel" style="flex:1;max-height:none"></div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="auditOverlay">
+  <div class="overlay-content">
+    <button class="overlay-close" onclick="closeAuditOverlay()">✕</button>
+    <div class="overlay-header">
+      <h2 id="ovTitle">Request Details</h2>
+      <div class="meta" id="ovMeta"></div>
+    </div>
+    <div class="overlay-body">
+      <div class="overlay-section" id="ovRequestSection">
+        <h3>📥 Request</h3>
+        <div class="content-block" id="ovRequestContent"></div>
+      </div>
+      <div class="overlay-section" id="ovResponseSection">
+        <h3>📤 Response</h3>
+        <div class="content-block" id="ovResponseContent"></div>
+      </div>
+      <div class="overlay-section">
+        <h3>📊 Event Timeline</h3>
+        <div id="ovTimeline"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -853,9 +909,12 @@ function renderAuditTimeline(events){
     if(hasError) highlightClass=' highlight-error';
     if(isStreaming) highlightClass=' highlight-streaming';
     
-    html+='<div class="audit-request'+highlightClass+'">';
-    html+='<div class="audit-request-header" onclick="toggleAuditRequest(this)">';
-    html+='<span class="audit-toggle">▶</span>';
+    html+='<div class="audit-request'+highlightClass+'" data-request-id="'+esc(reqId)+'">';
+    html+='<div class="audit-request-header">';
+    html+='<span class="audit-toggle" onclick="event.stopPropagation();toggleAuditRequest(this.parentElement.parentElement.querySelector(\'.audit-request-details\'))">▶</span>';
+    
+    // Make the main content area clickable to open overlay
+    html+='<div class="audit-request-body" onclick="openAuditDetail(\''+esc(reqId)+'\')" style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer">';
     
     // Show method badge prominently
     if(firstEvent.method){
@@ -879,8 +938,9 @@ function renderAuditTimeline(events){
       html+='<span class="audit-request-prompt">'+esc(preview)+'</span>';
     }
     
-    html+='</div>';
-    
+    html+='</div>'; // close audit-request-body
+    html+='</div>'; // close audit-request-header
+
     html+='<div class="audit-request-details" style="display:none">';
     html+='<div class="audit-request-meta">';
     if(categories.length)html+='<span class="audit-tag">'+esc(categories.join(', '))+'</span>';
@@ -935,16 +995,13 @@ function renderAuditTimeline(events){
   document.getElementById('auditCount').textContent=totalEvents+' events in '+requestIds.length+' requests';
 }
 
-function toggleAuditRequest(header){
-  var details=header.nextElementSibling;
-  var toggle=header.querySelector('.audit-toggle');
-  if(details.style.display==='none'){
-    details.style.display='block';
-    toggle.textContent='▼';
-  }else{
-    details.style.display='none';
-    toggle.textContent='▶';
-  }
+function toggleAuditRequest(el){
+  var details=el.classList.contains('audit-request-details')?el:el.nextElementSibling;
+  var container=el.closest('.audit-request');
+  var toggle=container?container.querySelector('.audit-toggle'):null;
+  var hidden=details.style.display==='none'||details.style.display==='';
+  details.style.display=hidden?'block':'none';
+  if(toggle)toggle.textContent=hidden?'▼':'▶';
 }
 
 function fmtDuration(s){s=Math.abs(s);if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m '+Math.round(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}
@@ -1041,6 +1098,147 @@ function initDivider(){
 initDivider();initTabs();refresh();sideRefresh();
 setInterval(refresh,3000);setInterval(loadJobs,5000);setInterval(sideRefresh,6000);
 pollLogs();
+
+// Audit Trail Overlay Functions
+var _ovDetail=null;
+async function openAuditDetail(requestId){
+  try{
+    var resp=await fetch('/api/audit/detail/'+encodeURIComponent(requestId)).then(function(r){return r.json()});
+    _ovDetail=resp;
+    renderOverlay(resp);
+    document.getElementById('auditOverlay').classList.add('active');
+    document.body.style.overflow='hidden';
+  }catch(e){
+    console.error('Failed to load audit detail:',e);
+  }
+}
+
+function closeAuditOverlay(){
+  document.getElementById('auditOverlay').classList.remove('active');
+  document.body.style.overflow='';
+  _ovDetail=null;
+}
+
+// Close on Escape key
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape')closeAuditOverlay();
+});
+
+// Close on backdrop click
+document.getElementById('auditOverlay').addEventListener('click',function(e){
+  if(e.target===this)closeAuditOverlay();
+});
+
+function renderOverlay(detail){
+  var events=detail.events||[];
+  var firstReq=events.find(function(e){return e.event_type==='request'});
+  var firstResp=events.find(function(e){return e.event_type==='response'});
+  var activeStream=firstReq&&!firstResp;
+  
+  // Title
+  var title=firstReq?(firstReq.method||'')+' '+(firstReq.path||'')+' — '+(firstReq.model||'')+(activeStream?' (active)':''):'Request Details';
+  document.getElementById('ovTitle').textContent=title;
+  
+  // Meta
+  var metaHtml='<span>🆔 '+esc(detail.request_id)+'</span>'+
+    '<span style="color:'+(activeStream?'var(--accent3)':'var(--text3)')+'">⏱ '+(activeStream?'Streaming...':fmtDuration((detail.total_duration_ms||0)/1000))+'</span>'+
+    '<span>📊 '+detail.total_events+' event(s)</span>';
+  if(detail.model)metaHtml+='<span>🔤 '+esc(detail.model)+'</span>';
+  if(detail.status_code)metaHtml+='<span style="color:'+(detail.status_code<400?'var(--green)':'var(--red)')+'">'+(detail.status_code<400?'✓':'✗')+' '+detail.status_code+'</span>';
+  if(detail.token_count)metaHtml+='<span>🔢 '+detail.token_count+' tokens</span>';
+  document.getElementById('ovMeta').innerHTML=metaHtml;
+  
+  // Request section
+  var reqSection=document.getElementById('ovRequestSection');
+  if(firstReq&&firstReq.prompt){
+    reqSection.style.display='';
+    var reqContent='';
+    if(firstReq.overrides){
+      try{
+        reqContent=JSON.stringify(firstReq.overrides,null,2);
+      }catch(e){reqContent=String(firstReq.overrides);}
+    }else{
+      reqContent='Prompt: '+esc(firstReq.prompt);
+    }
+    if(firstReq.query)reqContent+='\n\nQuery: '+firstReq.query;
+    document.getElementById('ovRequestContent').textContent=reqContent;
+  }else{
+    reqSection.style.display='none';
+  }
+  
+  // Response section
+  var respSection=document.getElementById('ovResponseSection');
+  if(firstResp&&firstResp.content){
+    respSection.style.display='';
+    document.getElementById('ovResponseContent').textContent=firstResp.content;
+  }else if(activeStream){
+    respSection.style.display='';
+    document.getElementById('ovResponseContent').textContent='⏳ Response streaming in progress...';
+  }else{
+    respSection.style.display='none';
+  }
+  
+  // Timeline
+  var tlHtml='<div class="overlay-timeline">';
+  events.forEach(function(e,i){
+    var icon,color,bgColor;
+    switch(e.event_type){
+      case 'request':icon='📥';color='#39d2c0';bgColor='rgba(57,210,192,.2)';break;
+      case 'response':icon='📤';color='#58a6ff';bgColor='rgba(88,166,255,.2)';break;
+      case 'error':icon='❌';color='#f85149';bgColor='rgba(248,81,73,.2)';break;
+      case 'job_complete':icon='✅';color='#2ea043';bgColor='rgba(46,160,67,.2)';break;
+      case 'job_error':icon='⚠️';color='#f0883e';bgColor='rgba(240,136,62,.2)';break;
+      case 'forward':icon='🔀';color='#bc8cff';bgColor='rgba(188,140,255,.2)';break;
+      case 'cache_hit':icon='💾';color='#f0883e';bgColor='rgba(240,136,62,.2)';break;
+      default:icon='⚡';color='#6e7681';bgColor='rgba(110,118,129,.2)';
+    }
+    
+    tlHtml+='<div class="overlay-timeline-event">';
+    tlHtml+='<div class="ov-tl-dot" style="background:'+color+';box-shadow:0 0 6px '+bgColor+'">'+'</div>';
+    tlHtml+='<div class="ov-tl-line"></div>';
+    tlHtml+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">';
+    tlHtml+='<span>'+icon+'</span>';
+    tlHtml+='<span style="font-size:11px;font-weight:600;color:'+color+'">'+e.event_type.toUpperCase()+'</span>';
+    tlHtml+='<span style="font-size:9px;color:var(--text3);font-family:monospace">'+fmtTime(new Date(e.created_at).getTime()/1000)+'</span>';
+    if(e.status_code)tlHtml+='<span style="font-size:9px;color:'+(e.status_code<400?'var(--green)':'var(--red)')+'">'+e.status_code+'</span>';
+    if(e.duration_ms)tlHtml+='<span style="font-size:9px;color:var(--text3);font-family:monospace">'+e.duration_ms.toFixed(0)+'ms</span>';
+    tlHtml+='</div>';
+    
+    // Stats
+    var stats=[];
+    if(e.model)stats.push('🔤 '+esc(e.model));
+    if(e.job_type)stats.push('📋 '+esc(e.job_type));
+    if(e.job_id)stats.push('🆔 '+esc(e.job_id));
+    if(e.token_count)stats.push('🔢 '+e.token_count+' tokens');
+    if(stats.length){
+      tlHtml+='<div class="ov-tl-stats">'+stats.map(function(s){return '<span>'+s+'</span>'}).join('')+'</div>';
+    }
+    
+    // Content / error detail (expandable)
+      var hasContent=e.content||e.error_message||e.prompt;
+      if(hasContent){
+        tlHtml+='<span class="ov-tl-expand" onclick="toggleOvEvent(this)">▶ Show Details</span>';
+        var bodyContent='';
+        if(e.error_message)bodyContent='❌ Error: '+esc(e.error_message);
+        else if(e.prompt)bodyContent=esc(e.prompt);
+        else bodyContent=esc(e.content);
+        tlHtml+='<div class="ov-tl-body">'+bodyContent+'</div>';
+      }
+    
+    tlHtml+='</div>';
+  });
+  tlHtml+='</div>';
+  document.getElementById('ovTimeline').innerHTML=tlHtml;
+}
+
+function toggleOvEvent(el){
+  var body=el.nextElementSibling;
+  if(body&&body.classList.contains('ov-tl-body')){
+    var hidden=body.style.display==='none'||body.style.display==='';
+    body.style.display=hidden?'block':'none';
+    el.textContent=hidden?'▼ Hide Details':'▶ Show Details';
+  }
+}
 </script>
 </body>
 </html>

@@ -329,6 +329,67 @@ func (atm *AuditTrailManager) Stop() {
 	close(atm.stopCh)
 }
 
+func (atm *AuditTrailManager) GetRequestDetail(requestID string) (map[string]interface{}, error) {
+	events, err := atm.GetRequestTimeline(requestID)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(events) == 0 {
+		return nil, nil
+	}
+
+	detail := map[string]interface{}{
+		"request_id":   requestID,
+		"events":       events,
+		"total_events": len(events),
+	}
+
+	// Extract first request event as the primary event
+	for _, e := range events {
+		if e.EventType == "request" {
+			detail["method"] = e.Method
+			detail["path"] = e.Path
+			detail["model"] = e.Model
+			detail["prompt"] = e.Prompt
+			detail["query"] = e.Query
+			detail["client_id"] = e.ClientID
+			detail["agent_type"] = e.AgentType
+			detail["job_type"] = e.JobType
+			detail["overrides"] = e.Overrides
+			break
+		}
+	}
+
+	// Extract response content
+	for _, e := range events {
+		if e.EventType == "response" && e.Content != "" {
+			detail["response_content"] = e.Content
+			detail["status_code"] = e.StatusCode
+			if e.TokenCount > 0 {
+				detail["token_count"] = e.TokenCount
+			}
+			break
+		}
+	}
+
+	// Calculate timeline metrics
+	var totalDuration float64
+	if len(events) > 1 {
+		totalDuration = events[len(events)-1].CreatedAt.Sub(events[0].CreatedAt).Seconds() * 1000
+	}
+	detail["total_duration_ms"] = totalDuration
+
+	// Event type counts
+	eventCounts := make(map[string]int)
+	for _, e := range events {
+		eventCounts[e.EventType]++
+	}
+	detail["event_counts"] = eventCounts
+
+	return detail, nil
+}
+
 // Query methods
 func (atm *AuditTrailManager) GetRequestTimeline(requestID string) ([]AuditEvent, error) {
 	query := `SELECT id, request_id, parent_id, event_type, category, method, path,

@@ -119,6 +119,7 @@ func main() {
 	mux.HandleFunc("GET /api/audit/search", handleAuditSearch)
 	mux.HandleFunc("GET /api/audit/timeline/{request_id}", handleAuditTimeline)
 	mux.HandleFunc("GET /api/audit/summary/{request_id}", handleAuditSummary)
+	mux.HandleFunc("GET /api/audit/detail/{request_id}", handleAuditDetail)
 
 	// Apply middleware stack: CORS -> Auth -> Request Logger -> Audit -> Handler
 	handler := AuthMiddleware(apiKey, rl, requestLogger(corsMiddleware(auditMiddleware(auditManager, mux))))

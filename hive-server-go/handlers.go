@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	serverVersion    = "1.9.1"
+	serverVersion    = "1.9.2"
 	startTime        = time.Now()
 	globalQueue      *OllamaQueue // global reference for streaming
 	globalAuditManager *AuditTrailManager // global audit trail manager
@@ -1329,4 +1329,30 @@ func handleAuditSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, summary)
+}
+
+func handleAuditDetail(w http.ResponseWriter, r *http.Request) {
+	if globalAuditManager == nil {
+		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
+		return
+	}
+
+	requestID := r.PathValue("request_id")
+	if requestID == "" {
+		http.Error(w, `{"error":"request_id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	detail, err := globalAuditManager.GetRequestDetail(requestID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	if detail == nil {
+		http.Error(w, `{"error":"no events found for request"}`, http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, detail)
 }
