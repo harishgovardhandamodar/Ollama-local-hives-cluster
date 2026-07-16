@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"reflect"
 	"regexp"
 	"sync"
 	"time"
@@ -157,70 +158,82 @@ func (q *OllamaQueue) Submit(job *Job) bool {
 func (q *OllamaQueue) worker(id int) {
 	defer q.wg.Done()
 	for {
-		select {
-		case <-q.stopCh:
-			return
-		default:
-			// Try high priority first, then normal, then low
-			var job *Job
-			for i := PriorityMax; i >= PriorityLow; i-- {
-				select {
-				case job = <-q.priorityQueues[i]:
-					goto process
-				default:
-					continue
-				}
-			}
+		// Build select cases dynamically for priority channels + main channel + stop
+		job := q.receiveJob()
+		if job == nil {
+			return // stopCh closed
+		}
 
-			// Try main queue
-			select {
-			case job = <-q.jobCh:
-			case <-q.stopCh:
-				return
-			}
+		job.Status = JobRunning
+		t := now()
+		job.StartedAt = &t
 
-		process:
-			if job == nil {
-				continue
-			}
+		q.mu.Lock()
+		q.running[job.ID] = job
+		q.mu.Unlock()
 
-			job.Status = JobRunning
-			now := now()
-			job.StartedAt = &now
+		q.executeJob(job)
 
-			q.mu.Lock()
-			q.running[job.ID] = job
-			q.mu.Unlock()
+		q.mu.Lock()
+		delete(q.running, job.ID)
+		q.completed[job.ID] = job
+		q.mu.Unlock()
 
-			q.executeJob(job)
+		NotifyJobUpdate(job)
 
-			q.mu.Lock()
-			delete(q.running, job.ID)
-			q.completed[job.ID] = job
-			q.mu.Unlock()
-
-			// Notify subscribers
-			NotifyJobUpdate(job)
-
-			// Track metrics
-			if job.StartedAt != nil && job.CompletedAt != nil {
-				duration := *job.CompletedAt - *job.StartedAt
-				globalMetrics.RecordJobDuration(duration)
-			}
-			globalMetrics.RecordTokenCount(job.TotalTokens)
-			if job.TotalTokens > 0 && job.StartedAt != nil && job.CompletedAt != nil {
-				duration := *job.CompletedAt - *job.StartedAt
-				if duration > 0 {
-					globalMetrics.RecordTPS(float64(job.TotalTokens) / duration)
-				}
-			}
-			if job.Status == JobCompleted {
-				globalMetrics.IncrJobsCompleted()
-			} else {
-				globalMetrics.IncrJobsFailed()
+		if job.StartedAt != nil && job.CompletedAt != nil {
+			duration := *job.CompletedAt - *job.StartedAt
+			globalMetrics.RecordJobDuration(duration)
+		}
+		globalMetrics.RecordTokenCount(job.TotalTokens)
+		if job.TotalTokens > 0 && job.StartedAt != nil && job.CompletedAt != nil {
+			duration := *job.CompletedAt - *job.StartedAt
+			if duration > 0 {
+				globalMetrics.RecordTPS(float64(job.TotalTokens) / duration)
 			}
 		}
+		if job.Status == JobCompleted {
+			globalMetrics.IncrJobsCompleted()
+		} else {
+			globalMetrics.IncrJobsFailed()
+		}
 	}
+}
+
+// receiveJob blocks until a job is available from any priority queue or the main queue.
+// Returns nil if stopCh is closed.
+func (q *OllamaQueue) receiveJob() *Job {
+	// Use reflect.Select for dynamic channel selection
+	cases := make([]reflect.SelectCase, 0, len(q.priorityQueues)+2)
+
+	// Stop channel (index 0)
+	cases = append(cases, reflect.SelectCase{
+		Dir:  reflect.SelectRecv,
+		Chan: reflect.ValueOf(q.stopCh),
+	})
+
+	// Main queue (index 1)
+	cases = append(cases, reflect.SelectCase{
+		Dir:  reflect.SelectRecv,
+		Chan: reflect.ValueOf(q.jobCh),
+	})
+
+	// Priority queues (indices 2..N)
+	for i := PriorityMax; i >= PriorityLow; i-- {
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(q.priorityQueues[i]),
+		})
+	}
+
+	chosen, value, _ := reflect.Select(cases)
+	if chosen == 0 {
+		return nil // stopCh
+	}
+	if value.IsValid() && !value.IsNil() {
+		return value.Interface().(*Job)
+	}
+	return nil
 }
 
 var resultPool = sync.Pool{

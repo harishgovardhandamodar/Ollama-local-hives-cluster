@@ -15,36 +15,67 @@ func main() {
 	cfgFile, _ := LoadConfigFile("")
 
 	// Apply config file defaults, then env overrides
-	ollamaURL := envOrDefault("OLLAMA_BASE_URL", firstNonEmpty(cfgFile.Server.OllamaURL, "http://localhost:11434"))
-	ollamaModel := envOrDefault("OLLAMA_MODEL", firstNonEmpty(cfgFile.Server.OllamaModel, "llama3.1:8b"))
-	serverPort := envOrDefaultInt("SERVER_PORT", firstNonZero(cfgFile.Server.Port, 8081))
-	maxConcurrent := envOrDefaultInt("MAX_CONCURRENT", firstNonZero(cfgFile.Server.MaxConcurrent, 2))
-	meshEnabled := os.Getenv("MESH_ENABLED") != "false"
-	maxClients := envOrDefaultInt("MAX_CLIENTS", firstNonZero(cfgFile.Server.MaxClients, 5))
-	readTimeout := envOrDefaultInt("HTTP_READ_TIMEOUT", firstNonZero(cfgFile.Server.ReadTimeout, 30))
-	writeTimeout := envOrDefaultInt("HTTP_WRITE_TIMEOUT", firstNonZero(cfgFile.Server.WriteTimeout, 600))
-	idleTimeout := envOrDefaultInt("HTTP_IDLE_TIMEOUT", firstNonZero(cfgFile.Server.IdleTimeout, 120))
-	apiKey := envOrDefault("HIVE_API_KEY", cfgFile.Server.APIKey)
-
+	var ollamaURL, ollamaModel, apiKey string
+	var serverPort, maxConcurrent, maxClients, readTimeout, writeTimeout, idleTimeout int
 	var customProviders []string
-	if len(cfgFile.CustomProviders) > 0 {
+
+	if cfgFile != nil {
+		ollamaURL = firstNonEmpty(cfgFile.Server.OllamaURL, "http://localhost:11434")
+		ollamaModel = firstNonEmpty(cfgFile.Server.OllamaModel, "llama3.1:8b")
+		serverPort = firstNonZero(cfgFile.Server.Port, 8081)
+		maxConcurrent = firstNonZero(cfgFile.Server.MaxConcurrent, 2)
+		maxClients = firstNonZero(cfgFile.Server.MaxClients, 5)
+		readTimeout = firstNonZero(cfgFile.Server.ReadTimeout, 30)
+		writeTimeout = firstNonZero(cfgFile.Server.WriteTimeout, 600)
+		idleTimeout = firstNonZero(cfgFile.Server.IdleTimeout, 120)
+		apiKey = cfgFile.Server.APIKey
 		customProviders = cfgFile.CustomProviders
+	} else {
+		ollamaURL = "http://localhost:11434"
+		ollamaModel = "llama3.1:8b"
+		serverPort = 8081
+		maxConcurrent = 2
+		maxClients = 5
+		readTimeout = 30
+		writeTimeout = 600
+		idleTimeout = 120
 	}
+
+	// Environment variables override config file
+	ollamaURL = envOrDefault("OLLAMA_BASE_URL", ollamaURL)
+	ollamaModel = envOrDefault("OLLAMA_MODEL", ollamaModel)
+	serverPort = envOrDefaultInt("SERVER_PORT", serverPort)
+	maxConcurrent = envOrDefaultInt("MAX_CONCURRENT", maxConcurrent)
+	maxClients = envOrDefaultInt("MAX_CLIENTS", maxClients)
+	readTimeout = envOrDefaultInt("HTTP_READ_TIMEOUT", readTimeout)
+	writeTimeout = envOrDefaultInt("HTTP_WRITE_TIMEOUT", writeTimeout)
+	idleTimeout = envOrDefaultInt("HTTP_IDLE_TIMEOUT", idleTimeout)
+	apiKey = envOrDefault("HIVE_API_KEY", apiKey)
+
 	if v := os.Getenv("CUSTOM_PROVIDER_URLS"); v != "" {
 		customProviders = splitAndTrim(v, ",")
 	}
+
+	meshEnabled := os.Getenv("MESH_ENABLED") != "false"
 
 	// Initialize database with WAL mode
 	initDB()
 
 	// Initialize cache if enabled
-	cacheEnabled := os.Getenv("HIVE_CACHE_ENABLED") == "true" || cfgFile.Cache.Enabled
+	cacheEnabled := os.Getenv("HIVE_CACHE_ENABLED") == "true"
 	var cache *ResponseCache
 	if cacheEnabled {
-		cacheEntries := envOrDefaultInt("HIVE_CACHE_MAX_ENTRIES", firstNonZero(cfgFile.Cache.MaxEntries, 1000))
-		cacheTTL := envOrDefaultInt("HIVE_CACHE_TTL_SECONDS", firstNonZero(cfgFile.Cache.TTLSeconds, 300))
-		cache = NewResponseCache(cacheEntries, cacheTTL)
-		logInfo("Response cache enabled: %d entries, %ds TTL", cacheEntries, cacheTTL)
+		cacheEntries := envOrDefaultInt("HIVE_CACHE_MAX_ENTRIES", 1000)
+		cacheTTL := envOrDefaultInt("HIVE_CACHE_TTL_SECONDS", 300)
+		if cfgFile != nil {
+			cacheEntries = firstNonZero(cfgFile.Cache.MaxEntries, cacheEntries)
+			cacheTTL = firstNonZero(cfgFile.Cache.TTLSeconds, cacheTTL)
+			cacheEnabled = cfgFile.Cache.Enabled || cacheEnabled
+		}
+		if cacheEnabled {
+			cache = NewResponseCache(cacheEntries, cacheTTL)
+			logInfo("Response cache enabled: %d entries, %ds TTL", cacheEntries, cacheTTL)
+		}
 	}
 
 	// Initialize rate limiter
@@ -70,10 +101,10 @@ func main() {
 	server.RegisterRoutes(mux)
 
 	// Add metrics endpoint
-	mux.HandleFunc("/metrics", handleMetrics)
+	mux.HandleFunc("GET /metrics", handleMetrics)
 
 	// Add job streaming endpoint
-	mux.HandleFunc("/api/jobs/stream", handleJobStream)
+	mux.HandleFunc("GET /api/jobs/stream", handleJobStream)
 
 	// Apply auth middleware
 	handler := AuthMiddleware(apiKey, rl, requestLogger(corsMiddleware(mux)))
