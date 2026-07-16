@@ -211,6 +211,17 @@ func (hs *HiveServer) handleOpenAIStream(w http.ResponseWriter, model string, ms
 	if resp.StatusCode >= 400 {
 		var errBody map[string]interface{}
 		json.NewDecoder(resp.Body).Decode(&errBody)
+		resp.Body.Close()
+
+		// On 404 (model not found), try forwarding to a peer that has it
+		if resp.StatusCode == 404 {
+			if peer := hs.findPeerWithModel(model); peer != nil {
+				logInfo("Model %s not found locally, forwarding streaming request to peer %s", model, peer.ServerID)
+				hs.forwardOpenAIToPeerStreaming(w, flusher, peer, model, msgs)
+				return
+			}
+		}
+
 		writeSSEError(w, flusher, fmt.Sprintf("ollama error (status %d): %v", resp.StatusCode, errBody))
 		return
 	}
@@ -408,7 +419,7 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 		return "", nil, err
 	}
 
-	// Submit as a regular chat job for queue visibility
+	// Submit as a chat job for queue visibility
 	jobID := fmt.Sprintf("openai:%d", time.Now().UnixMilli())
 	jobPayload := map[string]interface{}{
 		"model":    model,
@@ -416,22 +427,19 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 		"stream":   false,
 	}
 
-	job := NewJob(jobID, "openai-compat", "chat", jobPayload)
+	job := NewJob(jobID, "chat", "chat", jobPayload)
 	if !hs.queue.Submit(job) {
 		// Queue full — try forwarding to a less-loaded peer
-		if hs.mesh != nil {
-			peer := hs.mesh.GetBestPeer()
-			if peer != nil {
-				logInfo("OpenAI queue full, forwarding to peer %s (load=%.1f)", peer.ServerID, peer.Load)
-				resp, usage, err := hs.forwardOpenAIToPeer(peer, model, msgs)
-				if err == nil {
-					return resp, usage, nil
-				}
-				logWarn("Forward to %s failed: %v, trying direct Ollama", peer.ServerID, err)
+		if peer := hs.findPeerWithModel(model); peer != nil {
+			logInfo("OpenAI queue full, forwarding %s to peer %s (load=%.1f)", model, peer.ServerID, peer.Load)
+			resp, usage, err := hs.forwardOpenAIToPeer(peer, model, msgs)
+			if err == nil {
+				return resp, usage, nil
 			}
+			logWarn("Forward to %s failed: %v, trying direct Ollama", peer.ServerID, err)
 		}
 		// All peers full or unreachable — call Ollama directly
-		logWarn("Queue full for openai-compat job %s, calling Ollama directly", jobID)
+		logWarn("Queue full for openai job %s, calling Ollama directly", jobID)
 		return hs.callOllamaDirect(model, data)
 	}
 
@@ -450,6 +458,17 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 				continue
 			}
 			if j.Status == JobFailed {
+				// If model not found locally, try forwarding to a peer
+				if strings.Contains(j.Error, "not found") || strings.Contains(j.Error, "404") {
+					if peer := hs.findPeerWithModel(model); peer != nil {
+						logInfo("Model %s not found locally, forwarding to peer %s", model, peer.ServerID)
+						resp, usage, err := hs.forwardOpenAIToPeer(peer, model, msgs)
+						if err == nil {
+							return resp, usage, nil
+						}
+						logWarn("Forward to %s failed: %v", peer.ServerID, err)
+					}
+				}
 				return "", nil, fmt.Errorf("ollama error: %s", j.Error)
 			}
 			if j.Status == JobCompleted {
@@ -462,6 +481,67 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 				return response, usage, nil
 			}
 		}
+	}
+}
+
+// findPeerWithModel returns the least-loaded alive peer that has the given model locally
+func (hs *HiveServer) findPeerWithModel(model string) *PeerInfo {
+	if hs.mesh == nil {
+		return nil
+	}
+	peers := hs.mesh.GetAlivePeers()
+	var best *PeerInfo
+	for _, peer := range peers {
+		models := hs.mesh.GetCachedPeerModels(peer)
+		for _, m := range models {
+			if m == model {
+				if best == nil || peer.Load < best.Load {
+					best = peer
+				}
+				break
+			}
+		}
+	}
+	return best
+}
+
+// forwardOpenAIToPeerStreaming sends a streaming OpenAI request to a peer and streams the response as SSE
+func (hs *HiveServer) forwardOpenAIToPeerStreaming(w http.ResponseWriter, flusher http.Flusher, peer *PeerInfo, model string, msgs []map[string]string) {
+	forwardModel := model
+	if hs.mesh != nil {
+		forwardModel = hs.mesh.MapModel(model)
+	}
+
+	payload := map[string]interface{}{
+		"model":    forwardModel,
+		"messages": msgs,
+		"stream":   true,
+	}
+	data, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Post(peer.Endpoint+"/v1/chat/completions", "application/json", bytes.NewReader(data))
+	if err != nil {
+		writeSSEError(w, flusher, fmt.Sprintf("peer forward failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		writeSSEError(w, flusher, fmt.Sprintf("peer error (status %d): %s", resp.StatusCode, string(body)))
+		return
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		fmt.Fprintf(w, "%s\n\n", line)
+		flusher.Flush()
 	}
 }
 
@@ -577,7 +657,7 @@ func (hs *HiveServer) handleOpenAIListModels(w http.ResponseWriter, r *http.Requ
 	if hs.mesh != nil {
 		peers := hs.mesh.GetAlivePeers()
 		for _, peer := range peers {
-			peerModels := hs.fetchPeerModels(peer.Endpoint)
+			peerModels := hs.mesh.GetCachedPeerModels(peer)
 			for _, pm := range peerModels {
 				if _, exists := models[pm]; !exists {
 					models[pm] = OpenAIModel{
@@ -615,33 +695,6 @@ func (hs *HiveServer) handleOpenAIListModels(w http.ResponseWriter, r *http.Requ
 		Object: "list",
 		Data:   result,
 	})
-}
-
-// fetchPeerModels queries a peer's /v1/models and returns the model names
-func (hs *HiveServer) fetchPeerModels(peerEndpoint string) []string {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(peerEndpoint + "/v1/models")
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil
-	}
-
-	var names []string
-	for _, m := range result.Data {
-		if m.ID != "" {
-			names = append(names, m.ID)
-		}
-	}
-	return names
 }
 
 // handleOpenAIHealth handles GET /v1/health (non-standard but useful)

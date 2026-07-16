@@ -39,6 +39,9 @@ type MeshDiscovery struct {
 	mu    sync.RWMutex
 	peers map[string]*PeerInfo
 
+	peerModels     map[string][]string  // cached model lists per peer (serverID -> model names)
+	peerModelsTime map[string]time.Time // when each peer's models were last fetched
+
 	httpClient     *http.Client
 	getCapacity    func() int
 	getQueueStatus func() map[string]interface{}
@@ -63,8 +66,10 @@ func NewMeshDiscovery(serverID string, serverPort, discoveryPort, maxConcurrent 
 		announceAddr:  announceAddr,
 		modelMap:      modelMap,
 		peers:         make(map[string]*PeerInfo),
-		httpClient:    &http.Client{Timeout: 5 * time.Second},
-		stopCh:        make(chan struct{}),
+		peerModels:     make(map[string][]string),
+		peerModelsTime: make(map[string]time.Time),
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
+		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -527,6 +532,50 @@ func (m *MeshDiscovery) GetBestPeer() *PeerInfo {
 		}
 	}
 	return best
+}
+
+// GetCachedPeerModels returns cached model names for a peer, fetching if stale (>30s) or missing
+func (m *MeshDiscovery) GetCachedPeerModels(peer *PeerInfo) []string {
+	m.mu.RLock()
+	models, ok := m.peerModels[peer.ServerID]
+	lastFetch := m.peerModelsTime[peer.ServerID]
+	m.mu.RUnlock()
+
+	if ok && time.Since(lastFetch) < 30*time.Second {
+		return models
+	}
+
+	// Fetch fresh
+	models = fetchPeerModelNames(peer.Endpoint)
+	m.mu.Lock()
+	m.peerModels[peer.ServerID] = models
+	m.peerModelsTime[peer.ServerID] = time.Now()
+	m.mu.Unlock()
+	return models
+}
+
+func fetchPeerModelNames(endpoint string) []string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(endpoint + "/v1/models")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&result) != nil {
+		return nil
+	}
+	var names []string
+	for _, m := range result.Data {
+		if m.ID != "" {
+			names = append(names, m.ID)
+		}
+	}
+	return names
 }
 
 func (m *MeshDiscovery) RegisterPeer(serverID, endpoint string, maxConcurrent int, ollamaModel string) {
