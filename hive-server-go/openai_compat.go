@@ -619,7 +619,7 @@ func (hs *HiveServer) handleOpenAIListModels(w http.ResponseWriter, r *http.Requ
 
 // fetchPeerModels queries a peer's /v1/models and returns the model names
 func (hs *HiveServer) fetchPeerModels(peerEndpoint string) []string {
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(peerEndpoint + "/v1/models")
 	if err != nil {
 		return nil

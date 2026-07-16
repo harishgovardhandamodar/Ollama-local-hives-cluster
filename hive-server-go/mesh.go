@@ -280,6 +280,7 @@ func (m *MeshDiscovery) sendBeacon() {
 	beacon := map[string]interface{}{
 		"server_id":      m.serverID,
 		"port":           m.serverPort,
+		"announce_addr":  m.announceAddr,
 		"max_concurrent": m.maxConcurrent,
 		"ollama_model":   m.ollamaModel,
 	}
@@ -405,13 +406,24 @@ func (m *MeshDiscovery) handleBeacon(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	port, _ := beacon["port"].(float64)
-	endpoint := fmt.Sprintf("http://%s:%d", addr.IP.String(), int(port))
+	// Use announce_addr from beacon if available (resolves Docker NAT issues)
+	// Fall back to deriving endpoint from UDP source IP
+	var endpoint string
+	if announceAddr, ok := beacon["announce_addr"].(string); ok && announceAddr != "" {
+		endpoint = announceAddr
+	} else {
+		port, _ := beacon["port"].(float64)
+		endpoint = fmt.Sprintf("http://%s:%d", addr.IP.String(), int(port))
+	}
 	t := now()
 
 	m.mu.Lock()
 	if existing, ok := m.peers[peerID]; ok {
-		existing.Endpoint = endpoint
+		// Only update endpoint if beacon has announce_addr (more reliable than UDP source IP)
+		if announceAddr, ok := beacon["announce_addr"].(string); ok && announceAddr != "" {
+			existing.Endpoint = announceAddr
+		}
+		// If beacon has no announce_addr, keep existing endpoint (don't downgrade)
 		existing.LastSeen = t
 		if mc, ok := beacon["max_concurrent"].(float64); ok {
 			existing.MaxConcurrent = int(mc)
