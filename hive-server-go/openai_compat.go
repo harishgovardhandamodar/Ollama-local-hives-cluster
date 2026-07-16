@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -65,7 +66,7 @@ type OpenAIModel struct {
 }
 
 // handleOpenAIChatCompletions handles POST /v1/chat/completions
-// This is the main entry point for Hermes, Codex, and other OpenAI-compatible agents
+// Supports both streaming (SSE) and non-streaming responses
 func (hs *HiveServer) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -122,6 +123,13 @@ func (hs *HiveServer) handleOpenAIChatCompletions(w http.ResponseWriter, r *http
 		systemPrompt = "You are a helpful coding assistant. Write clean, production-ready code."
 	}
 
+	// ── Streaming mode ─────────────────────────────────────────────
+	if req.Stream {
+		hs.handleOpenAIStream(w, model, conversationMsgs)
+		return
+	}
+
+	// ── Non-streaming mode ─────────────────────────────────────────
 	// Use coding agent session if available, otherwise fall through to direct queue
 	if hs.codingAgent != nil {
 		resp, usage, err := hs.handleOpenAIViaAgent(model, systemPrompt, conversationMsgs, req)
@@ -162,6 +170,141 @@ func (hs *HiveServer) handleOpenAIChatCompletions(w http.ResponseWriter, r *http
 	}
 
 	writeJSON(w, resp)
+}
+
+// handleOpenAIStream streams the response from Ollama as OpenAI SSE chunks
+func (hs *HiveServer) handleOpenAIStream(w http.ResponseWriter, model string, msgs []map[string]string) {
+	// Set SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Build Ollama streaming request
+	ollamaBody := map[string]interface{}{
+		"model":    model,
+		"messages": msgs,
+		"stream":   true,
+	}
+
+	data, err := json.Marshal(ollamaBody)
+	if err != nil {
+		writeSSEError(w, flusher, err.Error())
+		return
+	}
+
+	// Call Ollama with streaming
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Post(hs.cfg.OllamaURL+"/api/chat", "application/json", bytes.NewReader(data))
+	if err != nil {
+		writeSSEError(w, flusher, fmt.Sprintf("ollama request failed: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var errBody map[string]interface{}
+		json.NewDecoder(resp.Body).Decode(&errBody)
+		writeSSEError(w, flusher, fmt.Sprintf("ollama error (status %d): %v", resp.StatusCode, errBody))
+		return
+	}
+
+	completionID := fmt.Sprintf("chatcmpl-hive-%d", time.Now().UnixMilli())
+	created := time.Now().Unix()
+
+	// Stream chunks from Ollama and forward as OpenAI SSE
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // 1MB buffer
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+
+		// Parse Ollama streaming chunk
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Done          bool    `json:"done"`
+			EvalCount     float64 `json:"eval_count"`
+			PromptEval    float64 `json:"prompt_eval_count"`
+			EvalDuration  float64 `json:"eval_duration"`
+		}
+
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			continue
+		}
+
+		// If done, send final chunk with finish_reason
+		if chunk.Done {
+			finalChunk := map[string]interface{}{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   model,
+				"choices": []map[string]interface{}{
+					{
+						"index":         0,
+						"delta":         map[string]string{},
+						"finish_reason": "stop",
+					},
+				},
+			}
+			finalData, _ := json.Marshal(finalChunk)
+			fmt.Fprintf(w, "data: %s\n\n", finalData)
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+
+		// Send content chunk
+		if chunk.Message.Content != "" {
+			sseChunk := map[string]interface{}{
+				"id":      completionID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   model,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"delta": map[string]string{
+							"content": chunk.Message.Content,
+						},
+						"finish_reason": nil,
+					},
+				},
+			}
+			chunkData, _ := json.Marshal(sseChunk)
+			fmt.Fprintf(w, "data: %s\n\n", chunkData)
+			flusher.Flush()
+		}
+	}
+
+	// If we exit the loop without a done chunk, send [DONE] anyway
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
+// writeSSEError sends an error as an SSE event and closes the stream
+func writeSSEError(w http.ResponseWriter, flusher http.Flusher, errMsg string) {
+	errChunk := map[string]interface{}{
+		"error": map[string]string{
+			"message": errMsg,
+			"type":    "server_error",
+		},
+	}
+	data, _ := json.Marshal(errChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 // handleOpenAIViaAgent routes through the coding agent session for context management
@@ -384,8 +527,8 @@ func (hs *HiveServer) callOllamaDirect(model string, data []byte) (string, *Open
 			Role    string `json:"role"`
 			Content string `json:"content"`
 		} `json:"message"`
-		EvalCount   float64 `json:"eval_count"`
-		PromptEval  float64 `json:"prompt_eval_count"`
+		EvalCount  float64 `json:"eval_count"`
+		PromptEval float64 `json:"prompt_eval_count"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -436,10 +579,6 @@ func (hs *HiveServer) handleOpenAIListModels(w http.ResponseWriter, r *http.Requ
 		for _, peer := range peers {
 			peerModels := hs.fetchPeerModels(peer.Endpoint)
 			for _, pm := range peerModels {
-				// Apply reverse model map so mapped names appear correctly
-				// e.g. if this Mac maps gemma4:31b-mlx->gemma4:31b when forwarding,
-				//       and peer has gemma4:31b, show it as gemma4:31b (already correct)
-				//       but if peer has gemma4:31b-mlx and we map it, show the mapped name
 				if _, exists := models[pm]; !exists {
 					models[pm] = OpenAIModel{
 						ID:      pm,
