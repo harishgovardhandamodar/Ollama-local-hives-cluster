@@ -276,6 +276,9 @@ func (m *MeshDiscovery) sendBeacon() {
 		beacon["pending_jobs"] = q["pending"]
 		beacon["running_jobs"] = q["running"]
 	}
+	if m.getCapacity != nil {
+		beacon["available_capacity"] = m.getCapacity()
+	}
 	if m.getClients != nil {
 		beacon["clients"] = m.getClients()
 	}
@@ -413,6 +416,10 @@ func (m *MeshDiscovery) handleBeacon(data []byte, addr *net.UDPAddr) {
 		if c, ok := beacon["clients"].(float64); ok {
 			existing.Clients = int(c)
 		}
+		// available_capacity from beacon is more accurate than computed from running_jobs
+		if ac, ok := beacon["available_capacity"].(float64); ok {
+			existing.AvailableCap = int(ac)
+		}
 	} else {
 		peer := &PeerInfo{
 			ServerID:      peerID,
@@ -423,6 +430,7 @@ func (m *MeshDiscovery) handleBeacon(data []byte, addr *net.UDPAddr) {
 			PendingJobs:   int(getFloat(beacon, "pending_jobs", 0)),
 			RunningJobs:   int(getFloat(beacon, "running_jobs", 0)),
 			Clients:       int(getFloat(beacon, "clients", 0)),
+			AvailableCap:  int(getFloat(beacon, "available_capacity", 0)),
 		}
 		m.peers[peerID] = peer
 		logInfo("Discovered peer: %s at %s", peerID, endpoint)

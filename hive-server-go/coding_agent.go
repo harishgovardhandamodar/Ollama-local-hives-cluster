@@ -81,17 +81,21 @@ type CodingAgentAuditEntry struct {
 type CodingAgentManager struct {
 	db       *DBStore
 	queue    *OllamaQueue
+	mesh     *MeshDiscovery
 	detector *ModelContextDetector
+	serverID string
 	mu       sync.RWMutex
 	sessions map[string]*CodingAgentSession
 }
 
 // NewCodingAgentManager creates a new coding agent manager
-func NewCodingAgentManager(db *DBStore, queue *OllamaQueue) *CodingAgentManager {
+func NewCodingAgentManager(db *DBStore, queue *OllamaQueue, mesh *MeshDiscovery, serverID string) *CodingAgentManager {
 	return &CodingAgentManager{
 		db:       db,
 		queue:    queue,
+		mesh:     mesh,
 		detector: NewModelContextDetector(queue.ollamaURL),
+		serverID: serverID,
 		sessions: make(map[string]*CodingAgentSession),
 	}
 }
@@ -239,7 +243,19 @@ func (cam *CodingAgentManager) SendMessage(sessionID, role, content string, meta
 
 	job := NewJob(jobID, "coding-agent", "coding_agent_chat", jobPayload)
 	if !cam.queue.Submit(job) {
-		// Queue full — fall back to direct call for responsiveness
+		// Queue full — try forwarding to a less-loaded peer
+		if cam.mesh != nil {
+			peer := cam.mesh.GetBestPeer()
+			if peer != nil {
+				logInfo("Agent queue full, forwarding %s to peer %s (load=%.1f)", jobID, peer.ServerID, peer.Load)
+				response, err := cam.forwardToPeer(peer, session.Model, messages)
+				if err == nil {
+					return cam.finishMessage(session, inMsg, response, compressed)
+				}
+				logWarn("Forward to %s failed: %v, trying direct Ollama", peer.ServerID, err)
+			}
+		}
+		// All peers full or unreachable — fall back to direct call
 		logWarn("Queue full for agent job %s, calling Ollama directly", jobID)
 		response, err := cam.callOllamaChat(session.Model, messages)
 		if err != nil {
@@ -308,6 +324,49 @@ func (cam *CodingAgentManager) finishMessage(session *CodingAgentSession, inMsg 
 
 	logInfo("Coding agent message: session=%s role=%s tokens=%d (compressed=%v)", session.ID, inMsg.Role, inMsg.TokenCount, compressed)
 	return response, session, nil
+}
+
+// forwardToPeer sends a chat completion request to a peer and waits for the response.
+// The peer executes the inference on its local Ollama while session state stays here.
+func (cam *CodingAgentManager) forwardToPeer(peer *PeerInfo, model string, messages []map[string]string) (string, error) {
+	// Use the peer's /api/jobs/forward endpoint which blocks until completion
+	payload := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   false,
+		"source":   "coding_agent",
+	}
+
+	body := map[string]interface{}{
+		"job_id":    fmt.Sprintf("mesh-agent:%d", time.Now().UnixMilli()),
+		"client_id": "mesh-agent",
+		"job_type":  "coding_agent_chat",
+		"payload":   payload,
+		"origin":    cam.serverID,
+	}
+
+	data, _ := json.Marshal(body)
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Post(peer.Endpoint+"/api/jobs/forward", "application/json", bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("forward request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Status string      `json:"status"`
+		Result interface{} `json:"result"`
+		Error  string      `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode forward response failed: %w", err)
+	}
+
+	if result.Status == "failed" {
+		return "", fmt.Errorf("peer execution failed: %s", result.Error)
+	}
+
+	return extractChatResponse(result.Result), nil
 }
 
 // extractChatResponse pulls the response text from a queue job result

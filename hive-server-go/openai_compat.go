@@ -275,7 +275,19 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 
 	job := NewJob(jobID, "openai-compat", "chat", jobPayload)
 	if !hs.queue.Submit(job) {
-		// Queue full — call Ollama directly
+		// Queue full — try forwarding to a less-loaded peer
+		if hs.mesh != nil {
+			peer := hs.mesh.GetBestPeer()
+			if peer != nil {
+				logInfo("OpenAI queue full, forwarding to peer %s (load=%.1f)", peer.ServerID, peer.Load)
+				resp, usage, err := hs.forwardOpenAIToPeer(peer, model, msgs)
+				if err == nil {
+					return resp, usage, nil
+				}
+				logWarn("Forward to %s failed: %v, trying direct Ollama", peer.ServerID, err)
+			}
+		}
+		// All peers full or unreachable — call Ollama directly
 		logWarn("Queue full for openai-compat job %s, calling Ollama directly", jobID)
 		return hs.callOllamaDirect(model, data)
 	}
@@ -308,6 +320,48 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 			}
 		}
 	}
+}
+
+// forwardOpenAIToPeer sends an OpenAI chat completion request to a peer and waits for the response
+func (hs *HiveServer) forwardOpenAIToPeer(peer *PeerInfo, model string, msgs []map[string]string) (string, *OpenAIUsage, error) {
+	payload := map[string]interface{}{
+		"model":    model,
+		"messages": msgs,
+		"stream":   false,
+	}
+
+	body := map[string]interface{}{
+		"job_id":    fmt.Sprintf("mesh-openai:%d", time.Now().UnixMilli()),
+		"client_id": "mesh-openai",
+		"job_type":  "chat",
+		"payload":   payload,
+		"origin":    getServerID(),
+	}
+
+	data, _ := json.Marshal(body)
+	client := &http.Client{Timeout: 600 * time.Second}
+	resp, err := client.Post(peer.Endpoint+"/api/jobs/forward", "application/json", bytes.NewReader(data))
+	if err != nil {
+		return "", nil, fmt.Errorf("forward request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Status string      `json:"status"`
+		Result interface{} `json:"result"`
+		Error  string      `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", nil, fmt.Errorf("decode forward response failed: %w", err)
+	}
+
+	if result.Status == "failed" {
+		return "", nil, fmt.Errorf("peer execution failed: %s", result.Error)
+	}
+
+	response := extractChatResponse(result.Result)
+	usage := &OpenAIUsage{} // token metrics not available from peer forwarding
+	return response, usage, nil
 }
 
 // callOllamaDirect calls Ollama as a last resort

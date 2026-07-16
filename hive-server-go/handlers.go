@@ -151,7 +151,7 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 
 	var cam *CodingAgentManager
 	if defaultDB != nil {
-		cam = NewCodingAgentManager(defaultDB, queue)
+		cam = NewCodingAgentManager(defaultDB, queue, mesh, getServerID())
 	}
 
 	return &HiveServer{
