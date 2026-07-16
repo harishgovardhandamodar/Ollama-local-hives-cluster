@@ -329,9 +329,15 @@ func (cam *CodingAgentManager) finishMessage(session *CodingAgentSession, inMsg 
 // forwardToPeer sends a chat completion request to a peer and waits for the response.
 // The peer executes the inference on its local Ollama while session state stays here.
 func (cam *CodingAgentManager) forwardToPeer(peer *PeerInfo, model string, messages []map[string]string) (string, error) {
+	// Apply model mapping for cross-platform mesh (e.g. MLX -> NVIDIA)
+	forwardModel := model
+	if cam.mesh != nil {
+		forwardModel = cam.mesh.MapModel(model)
+	}
+
 	// Use the peer's /api/jobs/forward endpoint which blocks until completion
 	payload := map[string]interface{}{
-		"model":    model,
+		"model":    forwardModel,
 		"messages": messages,
 		"stream":   false,
 		"source":   "coding_agent",
