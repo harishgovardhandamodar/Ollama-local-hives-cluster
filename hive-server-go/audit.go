@@ -15,8 +15,8 @@ type AuditEvent struct {
 	ID            int64                  `json:"id"`
 	RequestID     string                 `json:"request_id"`
 	ParentID      string                 `json:"parent_id,omitempty"`
-	EventType     string                 `json:"event_type"` // request, response, error, forward, cache_hit, job_submit, job_complete
-	Category      string                 `json:"category"`  // coding_agent, openai_compat, job_queue, mesh, system
+	EventType     string                 `json:"event_type"`
+	Category      string                 `json:"category"`
 	Method        string                 `json:"method,omitempty"`
 	Path          string                 `json:"path,omitempty"`
 	StatusCode    int                    `json:"status_code,omitempty"`
@@ -31,6 +31,7 @@ type AuditEvent struct {
 	Overrides     map[string]interface{} `json:"overrides,omitempty"`
 	DurationMs    float64                `json:"duration_ms,omitempty"`
 	TokenCount    int                    `json:"token_count,omitempty"`
+	ServedBy      string                 `json:"served_by,omitempty"`
 	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 	ErrorMessage  string                 `json:"error_message,omitempty"`
 	CreatedAt     time.Time              `json:"created_at"`
@@ -42,6 +43,7 @@ type AuditTrailManager struct {
 	buffer  []AuditEvent
 	flushCh chan struct{}
 	stopCh  chan struct{}
+	serverID string
 }
 
 func NewAuditTrailManager(db *DBStore) *AuditTrailManager {
@@ -50,6 +52,7 @@ func NewAuditTrailManager(db *DBStore) *AuditTrailManager {
 		buffer:  make([]AuditEvent, 0, 100),
 		flushCh: make(chan struct{}, 1),
 		stopCh:  make(chan struct{}),
+		serverID: getServerID(),
 	}
 
 	// Create table
@@ -82,6 +85,7 @@ func (atm *AuditTrailManager) createTable() {
 		overrides TEXT DEFAULT '{}',
 		duration_ms REAL DEFAULT 0,
 		token_count INTEGER DEFAULT 0,
+		served_by TEXT DEFAULT '',
 		metadata TEXT DEFAULT '{}',
 		error_message TEXT DEFAULT '',
 		created_at REAL NOT NULL
@@ -97,6 +101,8 @@ func (atm *AuditTrailManager) createTable() {
 	if _, err := atm.db.db.ExecContext(context.Background(), query); err != nil {
 		logError("Failed to create audit trail table: %v", err)
 	}
+	// Add served_by column if upgrading from older version
+	atm.db.db.ExecContext(context.Background(), "ALTER TABLE request_audit_trail ADD COLUMN served_by TEXT DEFAULT ''")
 }
 
 func (atm *AuditTrailManager) LogEvent(event AuditEvent) {
@@ -236,6 +242,7 @@ func (atm *AuditTrailManager) LogResponse(requestID string, statusCode int, resp
 		Content:    content,
 		TokenCount: tokenCount,
 		DurationMs: durationMs,
+		ServedBy:   atm.serverID,
 	})
 }
 
@@ -308,15 +315,15 @@ func (atm *AuditTrailManager) flush() {
 		query := `INSERT INTO request_audit_trail
 			(request_id, parent_id, event_type, category, method, path, status_code,
 			 client_id, agent_type, model, job_type, job_id, content, query, prompt,
-			 overrides, duration_ms, token_count, metadata, error_message, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			 overrides, duration_ms, token_count, served_by, metadata, error_message, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 		_, err := atm.db.db.ExecContext(context.Background(), query,
 			event.RequestID, event.ParentID, event.EventType, event.Category,
 			event.Method, event.Path, event.StatusCode, event.ClientID,
 			event.AgentType, event.Model, event.JobType, event.JobID,
 			event.Content, event.Query, event.Prompt, string(overridesJSON),
-			event.DurationMs, event.TokenCount, string(metadataJSON),
+			event.DurationMs, event.TokenCount, event.ServedBy, string(metadataJSON),
 			event.ErrorMessage, event.CreatedAt.Unix())
 
 		if err != nil {
@@ -361,15 +368,21 @@ func (atm *AuditTrailManager) GetRequestDetail(requestID string) (map[string]int
 		}
 	}
 
-	// Extract response content
+	// Extract response data (content and served_by from any response event)
 	for _, e := range events {
-		if e.EventType == "response" && e.Content != "" {
-			detail["response_content"] = e.Content
-			detail["status_code"] = e.StatusCode
-			if e.TokenCount > 0 {
+		if e.EventType == "response" {
+			if e.Content != "" && detail["response_content"] == nil {
+				detail["response_content"] = e.Content
+			}
+			if detail["status_code"] == nil {
+				detail["status_code"] = e.StatusCode
+			}
+			if e.TokenCount > 0 && detail["token_count"] == nil {
 				detail["token_count"] = e.TokenCount
 			}
-			break
+			if e.ServedBy != "" && detail["served_by"] == nil {
+				detail["served_by"] = e.ServedBy
+			}
 		}
 	}
 
@@ -394,7 +407,7 @@ func (atm *AuditTrailManager) GetRequestDetail(requestID string) (map[string]int
 func (atm *AuditTrailManager) GetRequestTimeline(requestID string) ([]AuditEvent, error) {
 	query := `SELECT id, request_id, parent_id, event_type, category, method, path,
 		status_code, client_id, agent_type, model, job_type, job_id, content, query, prompt,
-		overrides, duration_ms, token_count, metadata, error_message, created_at
+		overrides, duration_ms, token_count, served_by, metadata, error_message, created_at
 		FROM request_audit_trail WHERE request_id = ? ORDER BY created_at ASC`
 
 	rows, err := atm.db.db.QueryContext(context.Background(), query, requestID)
@@ -413,13 +426,13 @@ func (atm *AuditTrailManager) GetRecentEvents(limit int, category string) ([]Aud
 	if category != "" {
 		query = `SELECT id, request_id, parent_id, event_type, category, method, path,
 			status_code, client_id, agent_type, model, job_type, job_id, content, query, prompt,
-			overrides, duration_ms, token_count, metadata, error_message, created_at
+			overrides, duration_ms, token_count, served_by, metadata, error_message, created_at
 			FROM request_audit_trail WHERE category = ? ORDER BY created_at DESC LIMIT ?`
 		args = append(args, category, limit)
 	} else {
 		query = `SELECT id, request_id, parent_id, event_type, category, method, path,
 			status_code, client_id, agent_type, model, job_type, job_id, content, query, prompt,
-			overrides, duration_ms, token_count, metadata, error_message, created_at
+			overrides, duration_ms, token_count, served_by, metadata, error_message, created_at
 			FROM request_audit_trail ORDER BY created_at DESC LIMIT ?`
 		args = append(args, limit)
 	}
@@ -436,7 +449,7 @@ func (atm *AuditTrailManager) GetRecentEvents(limit int, category string) ([]Aud
 func (atm *AuditTrailManager) SearchEvents(searchQuery string, limit int) ([]AuditEvent, error) {
 	query := `SELECT id, request_id, parent_id, event_type, category, method, path,
 		status_code, client_id, agent_type, model, job_type, job_id, content, query, prompt,
-		overrides, duration_ms, token_count, metadata, error_message, created_at
+		overrides, duration_ms, token_count, served_by, metadata, error_message, created_at
 		FROM request_audit_trail
 		WHERE content LIKE ? OR query LIKE ? OR prompt LIKE ? OR model LIKE ?
 		OR path LIKE ? OR method LIKE ? OR job_type LIKE ? OR error_message LIKE ?
@@ -500,7 +513,7 @@ func (atm *AuditTrailManager) scanEvents(rows *sql.Rows) ([]AuditEvent, error) {
 			&event.Category, &event.Method, &event.Path, &event.StatusCode,
 			&event.ClientID, &event.AgentType, &event.Model, &event.JobType,
 			&event.JobID, &event.Content, &event.Query, &event.Prompt,
-			&overrides, &event.DurationMs, &event.TokenCount, &metadata,
+			&overrides, &event.DurationMs, &event.TokenCount, &event.ServedBy, &metadata,
 			&event.ErrorMessage, &createdAt,
 		)
 		if err != nil {

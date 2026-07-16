@@ -142,6 +142,7 @@ tr:hover td{background:rgba(88,166,255,.04)}
 .audit-event-content-text{font-size:10px;color:var(--text2);line-height:1.5;word-break:break-word;background:var(--bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border);margin-top:4px}
 .audit-event-error{font-size:10px;color:var(--red);background:rgba(248,81,73,.1);padding:6px 8px;border-radius:4px;border:1px solid rgba(248,81,73,.2);margin-top:4px}
 .audit-request-prompt{font-size:9px;color:var(--text2);font-style:italic;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:2}
+.audit-request-served{font-size:9px;color:var(--accent3);font-family:monospace;flex-shrink:0}
 .audit-request.highlight-chat{border-left:3px solid var(--accent)}
 .audit-request.highlight-error{border-left:3px solid var(--red)}
 .audit-request.highlight-streaming{border-left:3px solid var(--accent3);animation:pulse-glow 2s ease-in-out infinite}
@@ -944,6 +945,10 @@ function renderAuditTimeline(events){
     if(durationMs>0) html+='<span class="audit-request-duration">'+fmtDuration(durationMs/1000)+'</span>';
     html+='<span class="audit-request-events">'+reqEvents.length+'</span>';
     
+    // Show served_by from response event
+    var servedBy=reqEvents.reduce(function(acc,e){return e.served_by||acc;},'');
+    if(servedBy) html+='<span class="audit-request-served">@ '+esc(servedBy)+'</span>';
+    
     // Show prompt preview inline
     var firstPrompt=reqEvents[0].prompt||'';
     if(firstPrompt){
@@ -1173,6 +1178,7 @@ function renderOverlay(detail){
   if(detail.model)metaHtml+='<span>🔤 '+esc(detail.model)+'</span>';
   if(detail.status_code)metaHtml+='<span style="color:'+(detail.status_code<400?'var(--green)':'var(--red)')+'">'+(detail.status_code<400?'✓':'✗')+' '+detail.status_code+'</span>';
   if(detail.token_count)metaHtml+='<span>🔢 '+detail.token_count+' tokens</span>';
+  if(detail.served_by)metaHtml+='<span>📍 '+esc(detail.served_by)+'</span>';
   document.getElementById('ovMeta').innerHTML=metaHtml;
   
   // Request section
@@ -1237,6 +1243,7 @@ function renderOverlay(detail){
     if(e.job_type)stats.push('📋 '+esc(e.job_type));
     if(e.job_id)stats.push('🆔 '+esc(e.job_id));
     if(e.token_count)stats.push('🔢 '+e.token_count+' tokens');
+    if(e.served_by)stats.push('📍 '+esc(e.served_by));
     if(stats.length){
       tlHtml+='<div class="ov-tl-stats">'+stats.map(function(s){return '<span>'+s+'</span>'}).join('')+'</div>';
     }
