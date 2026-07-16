@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -33,6 +34,7 @@ type MeshDiscovery struct {
 	maxConcurrent int
 	ollamaModel   string
 	announceAddr  string // resolved LAN IP or env override
+	modelMap      map[string]string // model name remapping for cross-platform mesh
 
 	mu    sync.RWMutex
 	peers map[string]*PeerInfo
@@ -47,7 +49,11 @@ type MeshDiscovery struct {
 
 func NewMeshDiscovery(serverID string, serverPort, discoveryPort, maxConcurrent int, ollamaModel string) *MeshDiscovery {
 	announceAddr := resolveAnnounceAddress(serverPort)
+	modelMap := parseModelMap()
 	logInfo("Mesh announce address: %s", announceAddr)
+	if len(modelMap) > 0 {
+		logInfo("Mesh model map: %v", modelMap)
+	}
 	return &MeshDiscovery{
 		serverID:      serverID,
 		serverPort:    serverPort,
@@ -55,6 +61,7 @@ func NewMeshDiscovery(serverID string, serverPort, discoveryPort, maxConcurrent 
 		maxConcurrent: maxConcurrent,
 		ollamaModel:   ollamaModel,
 		announceAddr:  announceAddr,
+		modelMap:      modelMap,
 		peers:         make(map[string]*PeerInfo),
 		httpClient:    &http.Client{Timeout: 5 * time.Second},
 		stopCh:        make(chan struct{}),
@@ -66,10 +73,15 @@ func NewMeshDiscovery(serverID string, serverPort, discoveryPort, maxConcurrent 
 func resolveAnnounceAddress(serverPort int) string {
 	// 1. Explicit override via env
 	if addr := os.Getenv("MESH_ANNOUNCE_ADDRESS"); addr != "" {
-		if u, err := url.Parse(addr); err == nil && u.Host != "" {
-			return u.Host
+		// If it already has http:// prefix, use as-is
+		if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
+			return addr
 		}
-		return addr
+		// Otherwise treat as host:port or just host
+		if u, err := url.Parse("http://" + addr); err == nil && u.Host != "" {
+			return "http://" + u.Host
+		}
+		return "http://" + addr
 	}
 
 	// 2. Auto-detect LAN IP
@@ -534,7 +546,7 @@ func (m *MeshDiscovery) Rescan(seedPeers []string) {
 
 func (m *MeshDiscovery) GetDiagnostics() map[string]interface{} {
 	alive := m.GetAlivePeers()
-	return map[string]interface{}{
+	diag := map[string]interface{}{
 		"enabled":        true,
 		"server_id":      m.serverID,
 		"discovery_port": m.discoveryPort,
@@ -544,6 +556,10 @@ func (m *MeshDiscovery) GetDiagnostics() map[string]interface{} {
 		"peers_alive":    len(alive),
 		"seed_peers":     getSeedPeers(),
 	}
+	if len(m.modelMap) > 0 {
+		diag["model_map"] = m.modelMap
+	}
+	return diag
 }
 
 func (m *MeshDiscovery) GetPeersList() []PeerInfo {
@@ -596,4 +612,41 @@ func getSeedPeers() []string {
 		}
 	}
 	return result
+}
+
+// parseModelMap parses MESH_MODEL_MAP env var.
+// Format: "source_model->target_model,source_model2->target_model2"
+// Example: "gemma4:31b-mlx->gemma4:31b,qwen3.6:35b-mlx->qwen3.6:35b"
+// When forwarding to a peer, the source model name is replaced with the target.
+func parseModelMap() map[string]string {
+	raw := os.Getenv("MESH_MODEL_MAP")
+	if raw == "" {
+		return nil
+	}
+	m := make(map[string]string)
+	for _, pair := range splitAndTrim(raw, ",") {
+		parts := splitAndTrim(pair, "->")
+		if len(parts) == 2 {
+			m[parts[0]] = parts[1]
+		}
+	}
+	return m
+}
+
+// MapModel remaps a model name using the mesh model map.
+// Returns the mapped name if found, otherwise returns the original name.
+func (m *MeshDiscovery) MapModel(model string) string {
+	if m.modelMap == nil {
+		return model
+	}
+	if mapped, ok := m.modelMap[model]; ok {
+		logInfo("Model mapped: %s -> %s", model, mapped)
+		return mapped
+	}
+	return model
+}
+
+// GetModelMap returns the model map for diagnostics
+func (m *MeshDiscovery) GetModelMap() map[string]string {
+	return m.modelMap
 }

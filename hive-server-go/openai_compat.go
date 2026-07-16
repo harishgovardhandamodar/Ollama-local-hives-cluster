@@ -324,8 +324,14 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 
 // forwardOpenAIToPeer sends an OpenAI chat completion request to a peer and waits for the response
 func (hs *HiveServer) forwardOpenAIToPeer(peer *PeerInfo, model string, msgs []map[string]string) (string, *OpenAIUsage, error) {
+	// Apply model mapping for cross-platform mesh (e.g. MLX -> NVIDIA)
+	forwardModel := model
+	if hs.mesh != nil {
+		forwardModel = hs.mesh.MapModel(model)
+	}
+
 	payload := map[string]interface{}{
-		"model":    model,
+		"model":    forwardModel,
 		"messages": msgs,
 		"stream":   false,
 	}
@@ -396,10 +402,12 @@ func (hs *HiveServer) callOllamaDirect(model string, data []byte) (string, *Open
 }
 
 // handleOpenAIListModels handles GET /v1/models
+// Returns models from local Ollama + all mesh peers so Hermes /model sees everything
 func (hs *HiveServer) handleOpenAIListModels(w http.ResponseWriter, r *http.Request) {
-	var models []OpenAIModel
+	models := make(map[string]OpenAIModel)
+	modelOrder := make([]string, 0)
 
-	// Get live models from Ollama
+	// 1. Get live models from local Ollama
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(hs.cfg.OllamaURL + "/api/tags")
 	if err == nil {
@@ -411,37 +419,90 @@ func (hs *HiveServer) handleOpenAIListModels(w http.ResponseWriter, r *http.Requ
 		}
 		if json.NewDecoder(resp.Body).Decode(&result) == nil {
 			for _, m := range result.Models {
-				models = append(models, OpenAIModel{
+				models[m.Name] = OpenAIModel{
 					ID:      m.Name,
 					Object:  "model",
 					Created: time.Now().Unix(),
-					OwnedBy: "ollama",
-				})
+					OwnedBy: "local",
+				}
+				modelOrder = append(modelOrder, m.Name)
 			}
 		}
 	}
 
-	// Always include the default model
-	defaultExists := false
-	for _, m := range models {
-		if m.ID == hs.cfg.OllamaModel {
-			defaultExists = true
-			break
+	// 2. Fetch models from all alive mesh peers
+	if hs.mesh != nil {
+		peers := hs.mesh.GetAlivePeers()
+		for _, peer := range peers {
+			peerModels := hs.fetchPeerModels(peer.Endpoint)
+			for _, pm := range peerModels {
+				// Apply reverse model map so mapped names appear correctly
+				// e.g. if this Mac maps gemma4:31b-mlx->gemma4:31b when forwarding,
+				//       and peer has gemma4:31b, show it as gemma4:31b (already correct)
+				//       but if peer has gemma4:31b-mlx and we map it, show the mapped name
+				if _, exists := models[pm]; !exists {
+					models[pm] = OpenAIModel{
+						ID:      pm,
+						Object:  "model",
+						Created: time.Now().Unix(),
+						OwnedBy: peer.ServerID,
+					}
+					modelOrder = append(modelOrder, pm)
+				}
+			}
 		}
 	}
-	if !defaultExists {
-		models = append(models, OpenAIModel{
+
+	// 3. Ensure default model is always listed
+	if _, exists := models[hs.cfg.OllamaModel]; !exists {
+		models[hs.cfg.OllamaModel] = OpenAIModel{
 			ID:      hs.cfg.OllamaModel,
 			Object:  "model",
 			Created: time.Now().Unix(),
-			OwnedBy: "ollama",
-		})
+			OwnedBy: "local",
+		}
+		modelOrder = append(modelOrder, hs.cfg.OllamaModel)
+	}
+
+	// 4. Build response in insertion order
+	result := make([]OpenAIModel, 0, len(models))
+	for _, name := range modelOrder {
+		if m, ok := models[name]; ok {
+			result = append(result, m)
+		}
 	}
 
 	writeJSON(w, OpenAIModelList{
 		Object: "list",
-		Data:   models,
+		Data:   result,
 	})
+}
+
+// fetchPeerModels queries a peer's /v1/models and returns the model names
+func (hs *HiveServer) fetchPeerModels(peerEndpoint string) []string {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(peerEndpoint + "/v1/models")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+
+	var names []string
+	for _, m := range result.Data {
+		if m.ID != "" {
+			names = append(names, m.ID)
+		}
+	}
+	return names
 }
 
 // handleOpenAIHealth handles GET /v1/health (non-standard but useful)
