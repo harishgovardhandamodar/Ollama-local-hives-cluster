@@ -100,6 +100,35 @@ tr:hover td{background:rgba(88,166,255,.04)}
 .range-tab{font-size:8px;padding:1px 6px;border-radius:4px;cursor:pointer;color:var(--text3);border:1px solid transparent;transition:all .2s;font-family:monospace}
 .range-tab:hover{color:var(--text);border-color:var(--border-light)}
 .range-tab.active{color:var(--orange);border-color:var(--orange);background:rgba(240,136,62,.08)}
+.audit-controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.audit-tag{font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(88,166,255,.15);color:var(--accent);margin-right:6px}
+.audit-tag.model{background:rgba(188,140,255,.15);color:var(--accent3)}
+.audit-request{background:var(--surface2);border:1px solid var(--border);border-radius:8px;margin-bottom:8px;overflow:hidden;transition:border-color .2s}
+.audit-request:hover{border-color:var(--border-light)}
+.audit-request-header{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer;transition:background .15s}
+.audit-request-header:hover{background:rgba(88,166,255,.04)}
+.audit-toggle{font-size:10px;color:var(--text3);width:16px;flex-shrink:0}
+.audit-request-id{font-family:monospace;font-size:9px;color:var(--text3);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.audit-request-method{font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;background:rgba(57,210,192,.15);color:var(--accent2);flex-shrink:0}
+.audit-request-path{font-family:monospace;font-size:10px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.audit-request-time{font-size:9px;color:var(--text3);flex-shrink:0}
+.audit-request-duration{font-size:9px;color:var(--accent);flex-shrink:0}
+.audit-request-events{font-size:9px;color:var(--text3);flex-shrink:0}
+.audit-request-details{padding:0 12px 12px;border-top:1px solid var(--border)}
+.audit-request-meta{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.audit-timeline{position:relative;padding-left:20px}
+.audit-event{position:relative;padding-bottom:16px}
+.audit-event:last-child .audit-event-line{display:none}
+.audit-event-dot{position:absolute;left:-24px;top:4px;width:10px;height:10px;border-radius:50%;z-index:1}
+.audit-event-line{position:absolute;left:-20px;top:14px;width:2px;height:calc(100% - 10px);background:var(--border)}
+.audit-event-header{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.audit-event-icon{font-size:12px}
+.audit-event-type{font-size:9px;font-weight:700;letter-spacing:.3px}
+.audit-event-time{font-size:9px;color:var(--text3);font-family:monospace}
+.audit-event-status{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:rgba(0,0,0,.3)}
+.audit-event-duration{font-size:9px;color:var(--text3);font-family:monospace}
+.audit-event-content-text{font-size:10px;color:var(--text2);line-height:1.5;word-break:break-word;background:var(--bg);padding:6px 8px;border-radius:4px;border:1px solid var(--border);margin-top:4px}
+.audit-event-error{font-size:10px;color:var(--red);background:rgba(248,81,73,.1);padding:6px 8px;border-radius:4px;border:1px solid rgba(248,81,73,.2);margin-top:4px}
 .tabs{display:flex;gap:0;background:var(--surface2);border-bottom:1px solid var(--border);flex-wrap:wrap;border-radius:12px 12px 0 0}
 .tab-btn{background:none;border:none;padding:8px 14px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text3);cursor:pointer;border-bottom:2px solid transparent;transition:all .25s}
 .tab-btn:hover{color:var(--text);background:rgba(88,166,255,.04)}
@@ -250,12 +279,29 @@ select option{background:var(--surface);color:var(--text)}
         <div class="tabs">
           <button class="tab-btn active" data-tab="jobs">Recent Jobs</button>
           <button class="tab-btn" data-tab="resources">Resources</button>
+          <button class="tab-btn" data-tab="audit">Audit Trail</button>
         </div>
         <div class="tab-content active" id="tab-jobs">
           <div id="jobsTable" style="max-height:280px;overflow-y:auto"></div>
         </div>
         <div class="tab-content" id="tab-resources">
           <div id="resourcesContent" style="max-height:320px;overflow-y:auto"></div>
+        </div>
+        <div class="tab-content" id="tab-audit">
+          <div class="audit-controls">
+            <input type="text" id="auditSearch" placeholder="Search requests..." style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 12px;color:#e6edf3;font-size:12px;width:200px">
+            <select id="auditCategory" style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:6px 12px;color:#e6edf3;font-size:12px">
+              <option value="">All Categories</option>
+              <option value="coding_agent">Coding Agent</option>
+              <option value="openai_compat">OpenAI Compat</option>
+              <option value="job_queue">Job Queue</option>
+              <option value="mesh">Mesh</option>
+              <option value="system">System</option>
+            </select>
+            <button onclick="loadAuditTrail()" style="background:#238636;border:none;border-radius:6px;padding:6px 16px;color:#fff;font-size:12px;cursor:pointer">Search</button>
+            <span style="margin-left:auto;font-size:10px;color:#8b949e" id="auditCount">0 events</span>
+          </div>
+          <div id="auditTimeline" style="max-height:320px;overflow-y:auto;margin-top:12px"></div>
         </div>
       </div>
     </div>
@@ -695,8 +741,164 @@ function initTabs(){
       document.getElementById('tab-'+tabId).classList.add('active');
       if(tabId==='jobs')loadJobs();
       if(tabId==='resources')loadResources();
+      if(tabId==='audit')loadAuditTrail();
     });
   });
+}
+
+// Audit Trail Functions
+var auditSearchTimeout=null;
+async function loadAuditTrail(){
+  var search=document.getElementById('auditSearch').value;
+  var category=document.getElementById('auditCategory').value;
+  var url='/api/audit/recent?limit=100';
+  if(category)url+='&category='+encodeURIComponent(category);
+  
+  try{
+    var r=await fetch(url).then(function(r){return r.json()});
+    var events=r.events||[];
+    
+    // Filter by search if provided
+    if(search){
+      events=events.filter(function(e){
+        var searchLower=search.toLowerCase();
+        return (e.path||'').toLowerCase().includes(searchLower)||
+               (e.model||'').toLowerCase().includes(searchLower)||
+               (e.content||'').toLowerCase().includes(searchLower)||
+               (e.request_id||'').toLowerCase().includes(searchLower);
+      });
+    }
+    
+    renderAuditTimeline(events);
+  }catch(e){
+    document.getElementById('auditTimeline').innerHTML='<div class="empty">Failed to load audit trail</div>';
+  }
+}
+
+function renderAuditTimeline(events){
+  var el=document.getElementById('auditTimeline');
+  if(!events||!events.length){
+    el.innerHTML='<div class="empty">No audit events found</div>';
+    document.getElementById('auditCount').textContent='0 events';
+    return;
+  }
+  
+  // Group events by request_id
+  var requests={};
+  events.forEach(function(e){
+    if(!requests[e.request_id])requests[e.request_id]=[];
+    requests[e.request_id].push(e);
+  });
+  
+  var requestIds=Object.keys(requests).sort(function(a,b){
+    var lastA=requests[a][requests[a].length-1];
+    var lastB=requests[b][requests[b].length-1];
+    return new Date(lastB.created_at)-new Date(lastA.created_at);
+  });
+  
+  var html='';
+  var totalEvents=0;
+  
+  requestIds.forEach(function(reqId){
+    var reqEvents=requests[reqId];
+    totalEvents+=reqEvents.length;
+    
+    // Get request summary
+    var firstEvent=reqEvents[0];
+    var lastEvent=reqEvents[reqEvents.length-1];
+    var durationMs=0;
+    if(reqEvents.length>1){
+      durationMs=new Date(lastEvent.created_at)-new Date(firstEvent.created_at);
+    }
+    
+    // Get event type counts
+    var eventCounts={};
+    reqEvents.forEach(function(e){
+      eventCounts[e.event_type]=(eventCounts[e.event_type]||0)+1;
+    });
+    
+    // Get unique models and categories
+    var models=[];
+    var categories=[];
+    reqEvents.forEach(function(e){
+      if(e.model&&models.indexOf(e.model)===-1)models.push(e.model);
+      if(e.category&&categories.indexOf(e.category)===-1)categories.push(e.category);
+    });
+    
+    html+='<div class="audit-request">';
+    html+='<div class="audit-request-header" onclick="toggleAuditRequest(this)">';
+    html+='<span class="audit-toggle">▶</span>';
+    html+='<span class="audit-request-id">'+esc(reqId)+'</span>';
+    html+='<span class="audit-request-method">'+esc(firstEvent.method||'')+'</span>';
+    html+='<span class="audit-request-path">'+esc(firstEvent.path||'')+'</span>';
+    html+='<span class="audit-request-time">'+fmtTime(new Date(firstEvent.created_at).getTime()/1000)+'</span>';
+    html+='<span class="audit-request-duration">'+fmtDuration(durationMs/1000)+'</span>';
+    html+='<span class="audit-request-events">'+reqEvents.length+' event(s)</span>';
+    html+='</div>';
+    
+    html+='<div class="audit-request-details" style="display:none">';
+    html+='<div class="audit-request-meta">';
+    if(categories.length)html+='<span class="audit-tag">'+esc(categories.join(', '))+'</span>';
+    if(models.length)html+='<span class="audit-tag model">'+esc(models.join(', '))+'</span>';
+    html+='</div>';
+    
+    html+='<div class="audit-timeline">';
+    reqEvents.forEach(function(e,i){
+      var eventType=e.event_type;
+      var icon='⚡';
+      var color='#58a6ff';
+      if(eventType==='request'){icon='📥';color='#39d2c0';}
+      else if(eventType==='response'){icon='📤';color='#58a6ff';}
+      else if(eventType==='error'){icon='❌';color='#f85149';}
+      else if(eventType==='forward'){icon='🔀';color='#bc8cff';}
+      else if(eventType==='cache_hit'){icon='💾';color='#f0883e';}
+      else if(eventType==='job_submit'){icon='📋';color='#58a6ff';}
+      else if(eventType==='job_complete'){icon='✅';color='#2ea043';}
+      
+      html+='<div class="audit-event">';
+      html+='<div class="audit-event-dot" style="background:'+color+'"></div>';
+      html+='<div class="audit-event-line"></div>';
+      html+='<div class="audit-event-content">';
+      html+='<div class="audit-event-header">';
+      html+='<span class="audit-event-icon">'+icon+'</span>';
+      html+='<span class="audit-event-type" style="color:'+color+'">'+eventType.toUpperCase()+'</span>';
+      html+='<span class="audit-event-time">'+fmtTime(new Date(e.created_at).getTime()/1000)+'</span>';
+      if(e.status_code)html+='<span class="audit-event-status" style="color:'+(e.status_code<400?'#2ea043':'#f85149')+'">'+e.status_code+'</span>';
+      if(e.duration_ms)html+='<span class="audit-event-duration">'+e.duration_ms.toFixed(0)+'ms</span>';
+      html+='</div>';
+      
+      if(e.content){
+        var content=e.content;
+        if(content.length>200)content=content.substring(0,200)+'...';
+        html+='<div class="audit-event-content-text">'+esc(content)+'</div>';
+      }
+      
+      if(e.error_message){
+        html+='<div class="audit-event-error">'+esc(e.error_message)+'</div>';
+      }
+      
+      html+='</div>';
+      html+='</div>';
+    });
+    html+='</div>';
+    html+='</div>';
+    html+='</div>';
+  });
+  
+  el.innerHTML=html;
+  document.getElementById('auditCount').textContent=totalEvents+' events in '+requestIds.length+' requests';
+}
+
+function toggleAuditRequest(header){
+  var details=header.nextElementSibling;
+  var toggle=header.querySelector('.audit-toggle');
+  if(details.style.display==='none'){
+    details.style.display='block';
+    toggle.textContent='▼';
+  }else{
+    details.style.display='none';
+    toggle.textContent='▶';
+  }
 }
 
 function fmtDuration(s){s=Math.abs(s);if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m '+Math.round(s%60)+'s';return Math.round(s/3600)+'h '+Math.round((s%3600)/60)+'m';}

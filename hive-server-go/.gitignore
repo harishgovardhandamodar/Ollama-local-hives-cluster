@@ -1,0 +1,4 @@
+hive-serving
+*.db
+*.db-shm
+*.db-wal

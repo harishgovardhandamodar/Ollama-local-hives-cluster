@@ -87,6 +87,7 @@ type OllamaQueue struct {
 	completed     map[string]*Job
 	maxConcurrent int
 	ollamaURL     string
+	stopped       bool
 	ollamaModel   string
 
 	// Priority queues
@@ -132,6 +133,13 @@ func (q *OllamaQueue) Start() {
 }
 
 func (q *OllamaQueue) Stop() {
+	q.mu.Lock()
+	if q.stopped {
+		q.mu.Unlock()
+		return
+	}
+	q.stopped = true
+	q.mu.Unlock()
 	close(q.stopCh)
 	q.wg.Wait()
 }
@@ -180,6 +188,22 @@ func (q *OllamaQueue) worker(id int) {
 		q.mu.Unlock()
 
 		NotifyJobUpdate(job)
+
+		// Log audit trail event for job completion
+		if globalAuditManager != nil {
+			eventType := "job_complete"
+			if job.Status == JobFailed {
+				eventType = "job_error"
+			}
+			globalAuditManager.LogJobEvent("", job.ID, job.JobType, job.Model, eventType, map[string]interface{}{
+				"status":         string(job.Status),
+				"total_tokens":   job.TotalTokens,
+				"prompt_tokens":  job.PromptTokens,
+				"eval_tokens":    job.EvalTokens,
+				"eval_duration":  job.EvalDuration,
+				"client_id":      job.ClientID,
+			})
+		}
 
 		if job.StartedAt != nil && job.CompletedAt != nil {
 			duration := *job.CompletedAt - *job.StartedAt

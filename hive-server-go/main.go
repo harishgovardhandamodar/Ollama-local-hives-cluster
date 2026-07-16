@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -97,6 +100,11 @@ func main() {
 	server.Start()
 	defer server.Stop()
 
+	// Initialize audit trail manager
+	auditManager := NewAuditTrailManager(defaultDB)
+	globalAuditManager = auditManager
+	defer auditManager.Stop()
+
 	mux := http.NewServeMux()
 	server.RegisterRoutes(mux)
 
@@ -106,8 +114,14 @@ func main() {
 	// Add job streaming endpoint
 	mux.HandleFunc("GET /api/jobs/stream", handleJobStream)
 
-	// Apply auth middleware
-	handler := AuthMiddleware(apiKey, rl, requestLogger(corsMiddleware(mux)))
+	// Add audit trail API endpoints
+	mux.HandleFunc("GET /api/audit/recent", handleAuditRecent)
+	mux.HandleFunc("GET /api/audit/search", handleAuditSearch)
+	mux.HandleFunc("GET /api/audit/timeline/{request_id}", handleAuditTimeline)
+	mux.HandleFunc("GET /api/audit/summary/{request_id}", handleAuditSummary)
+
+	// Apply middleware stack: CORS -> Auth -> Request Logger -> Audit -> Handler
+	handler := AuthMiddleware(apiKey, rl, requestLogger(corsMiddleware(auditMiddleware(auditManager, mux))))
 
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", serverPort),
@@ -170,6 +184,68 @@ func firstNonZero(vals ...int) int {
 		}
 	}
 	return 0
+}
+
+func auditMiddleware(atm *AuditTrailManager, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip health check and static files from audit
+		if r.URL.Path == "/api/health" || r.URL.Path == "/api/status" ||
+			r.URL.Path == "/metrics" || r.URL.Path == "/api/peers" ||
+			r.URL.Path == "/api/peers/health" || strings.HasPrefix(r.URL.Path, "/static/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		start := time.Now()
+
+		// Read request body for audit
+		var bodyBytes []byte
+		if r.Body != nil {
+			bodyBytes, _ = io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+		}
+
+		// Log the request
+		requestID := atm.LogRequest(r, bodyBytes, "")
+
+		// Wrap response writer to capture response
+		lw := &auditLogWriter{
+			ResponseWriter: w,
+			statusCode:     http.StatusOK,
+			body:           &bytes.Buffer{},
+		}
+
+		next.ServeHTTP(lw, r)
+
+		// Log the response
+		durationMs := float64(time.Since(start).Milliseconds())
+		atm.LogResponse(requestID, lw.statusCode, lw.body.Bytes(), durationMs)
+
+		// Add request ID to response headers
+		w.Header().Set("X-Request-ID", requestID)
+	})
+}
+
+type auditLogWriter struct {
+	http.ResponseWriter
+	statusCode int
+	body       *bytes.Buffer
+}
+
+func (lw *auditLogWriter) WriteHeader(code int) {
+	lw.statusCode = code
+	lw.ResponseWriter.WriteHeader(code)
+}
+
+func (lw *auditLogWriter) Write(b []byte) (int, error) {
+	lw.body.Write(b)
+	return lw.ResponseWriter.Write(b)
+}
+
+func (lw *auditLogWriter) Flush() {
+	if f, ok := lw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func requestLogger(next http.Handler) http.Handler {

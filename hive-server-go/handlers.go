@@ -6,15 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 var (
-	serverVersion = "1.8.0"
-	startTime     = time.Now()
-	globalQueue   *OllamaQueue // global reference for streaming
+	serverVersion    = "1.9.0"
+	startTime        = time.Now()
+	globalQueue      *OllamaQueue // global reference for streaming
+	globalAuditManager *AuditTrailManager // global audit trail manager
 )
 
 type HiveServer struct {
@@ -1203,4 +1205,128 @@ func (hs *HiveServer) handleModelPullProxy(w http.ResponseWriter, r *http.Reques
 		"peer":    peer.ServerID,
 		"result":  result,
 	})
+}
+
+// Audit Trail API Handlers
+
+func handleAuditRecent(w http.ResponseWriter, r *http.Request) {
+	if globalAuditManager == nil {
+		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
+		return
+	}
+
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+
+	category := r.URL.Query().Get("category")
+
+	events, err := globalAuditManager.GetRecentEvents(limit, category)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"events": events,
+		"count":  len(events),
+	})
+}
+
+func handleAuditSearch(w http.ResponseWriter, r *http.Request) {
+	if globalAuditManager == nil {
+		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, `{"error":"query parameter 'q' required"}`, http.StatusBadRequest)
+		return
+	}
+
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+
+	events, err := globalAuditManager.SearchEvents(query, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"events": events,
+		"count":  len(events),
+		"query":  query,
+	})
+}
+
+func handleAuditTimeline(w http.ResponseWriter, r *http.Request) {
+	if globalAuditManager == nil {
+		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
+		return
+	}
+
+	requestID := r.PathValue("request_id")
+	if requestID == "" {
+		http.Error(w, `{"error":"request_id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	events, err := globalAuditManager.GetRequestTimeline(requestID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	if len(events) == 0 {
+		http.Error(w, `{"error":"no events found for request"}`, http.StatusNotFound)
+		return
+	}
+
+	// Calculate total duration
+	var totalDurationMs float64
+	if len(events) > 1 {
+		totalDurationMs = float64(events[len(events)-1].CreatedAt.Sub(events[0].CreatedAt).Milliseconds())
+	}
+
+	writeJSON(w, map[string]interface{}{
+		"request_id":      requestID,
+		"events":          events,
+		"total_events":    len(events),
+		"total_duration_ms": totalDurationMs,
+	})
+}
+
+func handleAuditSummary(w http.ResponseWriter, r *http.Request) {
+	if globalAuditManager == nil {
+		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
+		return
+	}
+
+	requestID := r.PathValue("request_id")
+	if requestID == "" {
+		http.Error(w, `{"error":"request_id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	summary, err := globalAuditManager.GetRequestSummary(requestID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+
+	if summary == nil {
+		http.Error(w, `{"error":"no events found for request"}`, http.StatusNotFound)
+		return
+	}
+
+	writeJSON(w, summary)
 }
