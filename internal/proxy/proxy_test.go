@@ -39,7 +39,7 @@ func newTestProxy() (*Proxy, *cluster.Manager, *balancer.Balancer, *queue.Queue,
 		OllamaAddr:     "http://127.0.0.1:11434",
 	}
 
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 	return p, cm, bal, q, hist
 }
 
@@ -78,7 +78,7 @@ func newProxyWithBackend() (*proxyWithServer, *cluster.Manager, *balancer.Balanc
 		OllamaAddr:     backend.URL,
 	}
 
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 	return &proxyWithServer{Proxy: p, backend: backend}, cm, bal
 }
 
@@ -102,7 +102,7 @@ func TestHandleOllamaRouting(t *testing.T) {
 		RequestTimeout: 1 * time.Second,
 		OllamaAddr:     "http://192.0.2.1:1",
 	}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	tests := []struct {
 		path string
@@ -155,7 +155,7 @@ func TestHandleSyncResponseNoNodes(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/generate", strings.NewReader(`{"model":"llama2","stream":false}`))
@@ -175,7 +175,7 @@ func TestHandleSyncResponseQueueFull(t *testing.T) {
 	q := queue.New(1)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	q.Enqueue(&queue.Request{ID: "filler"})
 
@@ -202,7 +202,7 @@ func TestHandleSyncResponseUpstreamError(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 1 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/generate", strings.NewReader(`{"model":"llama2","stream":false}`))
@@ -219,7 +219,7 @@ func TestHandleStreamResponseNoNodes(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"model":"llama2","stream":true}`))
@@ -249,7 +249,7 @@ func TestHandleStreamResponse(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"model":"llama2","stream":true}`))
@@ -281,7 +281,7 @@ func TestProxyLocalTags(t *testing.T) {
 		RequestTimeout: 5 * time.Second,
 		OllamaAddr:     backend.URL,
 	}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/tags", nil)
@@ -306,7 +306,7 @@ func TestHandleCancel(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	q.Enqueue(&queue.Request{ID: "req-1"})
 
@@ -330,7 +330,7 @@ func TestHandleCancelNotFound(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/cancel", strings.NewReader(`{"request_id":"nonexistent"}`))
@@ -430,11 +430,11 @@ func TestHandleStreamResponseNoFlusher(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := &noFlushWriter{header: make(http.Header)}
 	req := &queue.Request{ID: "stream-1", Model: "llama2"}
-	p.handleStreamResponse(w, req, []byte(`{"model":"llama2"}`), "llama2", "/api/chat")
+	p.handleStreamResponse(w, req, []byte(`{"model":"llama2"}`), "llama2", "/api/chat", "", nil)
 
 	if w.code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 when flusher not available, got %d", w.code)
@@ -490,7 +490,7 @@ func TestStreamResponseSetsHeaders(t *testing.T) {
 	q := queue.New(100)
 	hist := queue.NewHistory(100)
 	cfg := ProxyConfig{MaxConcurrent: 10, RequestTimeout: 5 * time.Second}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"model":"llama2","stream":true}`))
@@ -517,7 +517,7 @@ func TestProxyLocalError(t *testing.T) {
 		RequestTimeout: 1 * time.Second,
 		OllamaAddr:     "http://192.0.2.1:1",
 	}
-	p := New(cm, bal, q, hist, cfg)
+	p := New(cm, bal, q, hist, cfg, nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/tags", nil)

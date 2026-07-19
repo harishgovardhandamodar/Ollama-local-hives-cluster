@@ -1,0 +1,40 @@
+server:
+  port: 8081
+  ollama_url: http://localhost:11434
+  ollama_model: llama3.1:8b
+  max_concurrent: 4
+  max_clients: 10
+  read_timeout: 30
+  write_timeout: 600
+  idle_timeout: 120
+
+mesh:
+  enabled: true
+  discovery_port: 8082
+
+database:
+  path: /data/hive-server.db
+
+cache:
+  enabled: false
+  max_entries: 1000
+  ttl_seconds: 300
+
+semantic_cache:
+  enabled: false
+  max_entries: 1000
+  ttl_seconds: 300
+  similarity_threshold: 0.92
+  embedding_model: nomic-embed-text
+  index_type: lsh
+  embedding_cache_size: 5000
+  warmup_file: ""
+  model_embedding_map:
+    llama3: nomic-embed-text
+    mistral: nomic-embed-text
+    codellama: nomic-embed-text
+    qwen2: nomic-embed-text
+
+stream_buffer:
+  max_size: 1048576
+  timeout_seconds: 30

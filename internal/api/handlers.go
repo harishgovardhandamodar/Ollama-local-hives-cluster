@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -211,5 +212,91 @@ func (h *Handlers) HandleSSE(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		}
+	}
+}
+
+func (h *Handlers) HandleAPICacheStats(w http.ResponseWriter, r *http.Request) {
+	cache := h.proxy.GetSemanticCache()
+	if cache == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"enabled": false,
+			"message": "Semantic cache not enabled",
+		})
+		return
+	}
+
+	stats := cache.Stats()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+func (h *Handlers) HandleAPICacheEntries(w http.ResponseWriter, r *http.Request) {
+	cache := h.proxy.GetSemanticCache()
+	if cache == nil {
+		http.Error(w, `{"error":"semantic cache not enabled"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+
+	entries := cache.ListEntries(limit)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"entries": entries,
+		"count":   len(entries),
+	})
+}
+
+func (h *Handlers) HandleAPICacheClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cache := h.proxy.GetSemanticCache()
+	if cache == nil {
+		http.Error(w, `{"error":"semantic cache not enabled"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	cache.Clear()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "cleared"})
+}
+
+func (h *Handlers) HandleAPICacheInvalidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cache := h.proxy.GetSemanticCache()
+	if cache == nil {
+		http.Error(w, `{"error":"semantic cache not enabled"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	var payload struct {
+		EntryID string `json:"entry_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "bad json", http.StatusBadRequest)
+		return
+	}
+
+	if payload.EntryID == "" {
+		http.Error(w, "entry_id required", http.StatusBadRequest)
+		return
+	}
+
+	if cache.Invalidate(payload.EntryID) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "invalidated"})
+	} else {
+		http.Error(w, `{"error":"entry not found"}`, http.StatusNotFound)
 	}
 }

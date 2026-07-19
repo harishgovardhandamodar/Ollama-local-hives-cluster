@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,19 @@ type Config struct {
 	RequestTimeout   time.Duration
 	NodeCapacity     int
 	WebDir           string
+	DatabasePath     string
+
+	SemanticCacheEnabled             bool
+	SemanticCacheMaxEntries          int
+	SemanticCacheTTLSeconds          int
+	SemanticCacheSimilarityThreshold float64
+	SemanticCacheEmbeddingModel      string
+	SemanticCacheModelEmbeddingMap   map[string]string
+	SemanticCacheIndexType           string
+	SemanticCacheEmbeddingCacheSize  int
+	SemanticCacheWarmupFile          string
+	StreamBufferMaxSize              int
+	StreamBufferTimeoutSec          int
 }
 
 func Load() *Config {
@@ -32,6 +46,19 @@ func Load() *Config {
 		RequestTimeout:   300 * time.Second,
 		NodeCapacity:     5,
 		WebDir:           envOr("WEB_DIR", "./web"),
+		DatabasePath:     envOr("DATABASE_PATH", "./hive-server.db"),
+
+		SemanticCacheEnabled:             envOr("SEMANTIC_CACHE_ENABLED", "false") == "true",
+		SemanticCacheMaxEntries:          envIntOr("SEMANTIC_CACHE_MAX_ENTRIES", 1000),
+		SemanticCacheTTLSeconds:          envIntOr("SEMANTIC_CACHE_TTL_SECONDS", 300),
+		SemanticCacheSimilarityThreshold: 0.92,
+		SemanticCacheEmbeddingModel:      envOr("SEMANTIC_CACHE_EMBEDDING_MODEL", "nomic-embed-text"),
+		SemanticCacheModelEmbeddingMap:   parseModelEmbeddingMap(envOr("SEMANTIC_CACHE_MODEL_EMBEDDING_MAP", "")),
+		SemanticCacheIndexType:           envOr("SEMANTIC_CACHE_INDEX_TYPE", "lsh"),
+		SemanticCacheEmbeddingCacheSize:  envIntOr("SEMANTIC_CACHE_EMBEDDING_CACHE_SIZE", 5000),
+		SemanticCacheWarmupFile:          envOr("SEMANTIC_CACHE_WARMUP_FILE", ""),
+		StreamBufferMaxSize:              envIntOr("STREAM_BUFFER_MAX_SIZE", 1048576),
+		StreamBufferTimeoutSec:          envIntOr("STREAM_BUFFER_TIMEOUT_SEC", 30),
 	}
 
 	flag.StringVar(&cfg.NodeID, "node-id", cfg.NodeID, "Unique node ID (auto-generated if empty)")
@@ -42,6 +69,7 @@ func Load() *Config {
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "Request timeout")
 	flag.IntVar(&cfg.NodeCapacity, "capacity", cfg.NodeCapacity, "Node capacity (concurrent slot count)")
 	flag.StringVar(&cfg.WebDir, "web-dir", cfg.WebDir, "Path to web static files")
+	flag.StringVar(&cfg.DatabasePath, "db-path", cfg.DatabasePath, "Path to SQLite database")
 	flag.Parse()
 
 	if cfg.NodeID == "" {
@@ -65,4 +93,19 @@ func envIntOr(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func parseModelEmbeddingMap(s string) map[string]string {
+	if s == "" {
+		return make(map[string]string)
+	}
+	result := make(map[string]string)
+	pairs := strings.Split(s, ",")
+	for _, pair := range pairs {
+		parts := strings.SplitN(pair, ":", 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result
 }

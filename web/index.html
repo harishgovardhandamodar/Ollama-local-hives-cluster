@@ -156,6 +156,30 @@ body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg)
       </table>
     </div>
   </div>
+
+  <div class="card full-width">
+    <div class="card-header">
+      <h2>Semantic Cache</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button onclick="refreshCacheStats()" style="padding:4px 12px;border-radius:6px;background:var(--accent);border:none;color:white;font-size:12px;cursor:pointer">Refresh</button>
+        <button onclick="clearCache()" style="padding:4px 12px;border-radius:6px;background:var(--red);border:none;color:white;font-size:12px;cursor:pointer">Clear Cache</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="stats-row" id="cache-stats-row">
+        <div class="stat-card"><div class="stat-value" id="cache-entries">0</div><div class="stat-label">Cache Entries</div></div>
+        <div class="stat-card"><div class="stat-value green" id="cache-hits">0</div><div class="stat-label">Cache Hits</div></div>
+        <div class="stat-card"><div class="stat-value yellow" id="cache-misses">0</div><div class="stat-label">Cache Misses</div></div>
+        <div class="stat-card"><div class="stat-value purple" id="cache-hitrate">0%</div><div class="stat-label">Hit Rate</div></div>
+      </div>
+      <div style="margin-top:16px">
+        <h3 style="font-size:13px;color:var(--text2);margin-bottom:12px">Recent Cache Entries</h3>
+        <div class="queue-list scrollable" id="cache-entries-list">
+          <div class="empty-state">No cache entries</div>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -294,6 +318,42 @@ function setStrategy(s){
   fetch('/api/strategy',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({strategy:s})});
 }
 
+function refreshCacheStats(){
+  fetch('/api/cache/stats').then(r=>r.json()).then(d=>{
+    if(d.enabled===false){
+      document.getElementById('cache-entries').textContent='N/A';
+      document.getElementById('cache-hits').textContent='N/A';
+      document.getElementById('cache-misses').textContent='N/A';
+      document.getElementById('cache-hitrate').textContent='N/A';
+      document.getElementById('cache-entries-list').innerHTML='<div class="empty-state">Semantic cache not enabled</div>';
+      return;
+    }
+    document.getElementById('cache-entries').textContent=d.entries||0;
+    document.getElementById('cache-hits').textContent=d.hits||0;
+    document.getElementById('cache-misses').textContent=d.misses||0;
+    document.getElementById('cache-hitrate').textContent=d.hit_rate?Math.round(d.hit_rate*100)+'%':'0%';
+  }).catch(()=>{});
+
+  fetch('/api/cache/entries?limit=20').then(r=>r.json()).then(d=>{
+    const el=document.getElementById('cache-entries-list');
+    const entries=d.entries||[];
+    if(!entries.length){el.innerHTML='<div class="empty-state">No cache entries</div>';return}
+    el.innerHTML=entries.map(e=>`<div class="queue-item">
+      <span class="queue-id" title="${esc(e.id)}">${esc(e.id)}</span>
+      <span class="queue-model">${esc(e.model||'unknown')}</span>
+      <span class="queue-status q-complete">HITS: ${e.hit_count}</span>
+      <span class="queue-time">${timeAgo(e.created_at)}</span>
+    </div>`).join('');
+  }).catch(()=>{});
+}
+
+function clearCache(){
+  if(!confirm('Clear all semantic cache entries?'))return;
+  fetch('/api/cache/clear',{method:'POST'}).then(r=>r.json()).then(d=>{
+    refreshCacheStats();
+  }).catch(()=>{});
+}
+
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 function timeAgo(t){
   if(!t)return'';
@@ -305,6 +365,7 @@ function timeAgo(t){
 }
 
 connect();
+setInterval(refreshCacheStats, 10000);
 </script>
 </body>
 </html>
