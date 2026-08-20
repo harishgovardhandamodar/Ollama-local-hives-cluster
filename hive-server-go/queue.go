@@ -37,6 +37,12 @@ type Job struct {
 	EvalTokens    int                    `json:"completion_tokens,omitempty"`
 	TotalTokens   int                    `json:"total_tokens,omitempty"`
 	EvalDuration  float64                `json:"-"`
+	
+	// Priority queue fields
+	Priority      JobPriority            `json:"priority,omitempty"`
+	Deadline      time.Time              `json:"deadline,omitempty"`
+	RetryCount    int                    `json:"retry_count,omitempty"`
+	MaxRetries    int                    `json:"max_retries,omitempty"`
 }
 
 func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
