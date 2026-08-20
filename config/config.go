@@ -8,35 +8,38 @@ import (
 )
 
 type Config struct {
-	NodeID           string
-	ListenAddr       string
-	OllamaAddr       string
-	HeartbeatTimeout time.Duration
+	NodeID            string
+	ListenAddr        string
+	OllamaAddr        string
+	LoneWolfURL       string
+	HeartbeatTimeout  time.Duration
 	HeartbeatInterval time.Duration
-	MaxQueueSize     int
-	MaxConcurrent    int
-	RequestTimeout   time.Duration
-	NodeCapacity     int
-	WebDir           string
+	MaxQueueSize      int
+	MaxConcurrent     int
+	RequestTimeout    time.Duration
+	NodeCapacity      int
+	WebDir            string
 }
 
 func Load() *Config {
 	cfg := &Config{
-		NodeID:           envOr("NODE_ID", ""),
-		ListenAddr:       envOr("LISTEN_ADDR", ":8080"),
-		OllamaAddr:       envOr("OLLAMA_ADDR", "http://127.0.0.1:11434"),
-		HeartbeatTimeout: 10 * time.Second,
+		NodeID:            envOr("NODE_ID", ""),
+		ListenAddr:        envOr("LISTEN_ADDR", ":8080"),
+		OllamaAddr:        envOr("OLLAMA_ADDR", "http://127.0.0.1:11434"),
+		LoneWolfURL:       envOr("LONEWOLF_URL", "http://localhost:8088"),
+		HeartbeatTimeout:  10 * time.Second,
 		HeartbeatInterval: 3 * time.Second,
-		MaxQueueSize:     1000,
-		MaxConcurrent:    10,
-		RequestTimeout:   300 * time.Second,
-		NodeCapacity:     5,
-		WebDir:           envOr("WEB_DIR", "./web"),
+		MaxQueueSize:      1000,
+		MaxConcurrent:     10,
+		RequestTimeout:    300 * time.Second,
+		NodeCapacity:      5,
+		WebDir:            envOr("WEB_DIR", "./web"),
 	}
 
 	flag.StringVar(&cfg.NodeID, "node-id", cfg.NodeID, "Unique node ID (auto-generated if empty)")
 	flag.StringVar(&cfg.ListenAddr, "listen", cfg.ListenAddr, "Address to listen on")
 	flag.StringVar(&cfg.OllamaAddr, "ollama", cfg.OllamaAddr, "Local Ollama API address")
+	flag.StringVar(&cfg.LoneWolfURL, "lonewolf", cfg.LoneWolfURL, "LoneWolf Memory API address")
 	flag.IntVar(&cfg.MaxQueueSize, "max-queue", cfg.MaxQueueSize, "Max queued requests")
 	flag.IntVar(&cfg.MaxConcurrent, "max-concurrent", cfg.MaxConcurrent, "Max concurrent requests per node")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", cfg.RequestTimeout, "Request timeout")

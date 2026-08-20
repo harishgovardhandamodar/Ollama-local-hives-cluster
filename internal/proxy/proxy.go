@@ -14,6 +14,7 @@ import (
 	"github.com/hive-cluster/hive-serving/internal/balancer"
 	"github.com/hive-cluster/hive-serving/internal/cluster"
 	"github.com/hive-cluster/hive-serving/internal/queue"
+	"github.com/hive-cluster/hive-serving/memory"
 )
 
 type Proxy struct {
@@ -21,6 +22,7 @@ type Proxy struct {
 	balancer *balancer.Balancer
 	queue    *queue.Queue
 	history  *queue.History
+	memory   *memory.Client
 	config   ProxyConfig
 	mu       sync.RWMutex
 	active   map[string]*queue.Request
@@ -31,14 +33,16 @@ type ProxyConfig struct {
 	RequestTimeout time.Duration
 	NodeID         string
 	OllamaAddr     string
+	LoneWolfURL    string
 }
 
-func New(cluster *cluster.Manager, bal *balancer.Balancer, q *queue.Queue, history *queue.History, cfg ProxyConfig) *Proxy {
+func New(cluster *cluster.Manager, bal *balancer.Balancer, q *queue.Queue, history *queue.History, mem *memory.Client, cfg ProxyConfig) *Proxy {
 	return &Proxy{
 		cluster:  cluster,
 		balancer: bal,
 		queue:    q,
 		history:  history,
+		memory:   mem,
 		config:   cfg,
 		active:   make(map[string]*queue.Request),
 	}
@@ -76,6 +80,13 @@ func (p *Proxy) handleInference(w http.ResponseWriter, r *http.Request, apiPath 
 		priority = queue.Priority(int(pri))
 	}
 
+	if p.memory != nil {
+		p.recallAndInjectContext(reqBody, body)
+		if modified, err := json.Marshal(reqBody); err == nil {
+			body = modified
+		}
+	}
+
 	reqID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), randInt())
 	req := &queue.Request{
 		ID:       reqID,
@@ -98,6 +109,68 @@ func (p *Proxy) handleInference(w http.ResponseWriter, r *http.Request, apiPath 
 	}
 }
 
+func (p *Proxy) recallAndInjectContext(reqBody map[string]interface{}, body []byte) {
+	var prompt string
+	if messages, ok := reqBody["messages"].([]interface{}); ok && len(messages) > 0 {
+		if last, ok := messages[len(messages)-1].(map[string]interface{}); ok {
+			prompt, _ = last["content"].(string)
+		}
+	} else if p, ok := reqBody["prompt"].(string); ok {
+		prompt = p
+	}
+	if prompt == "" {
+		return
+	}
+
+	results, err := p.memory.Recall(memory.RecallRequest{
+		Query:   prompt,
+		Limit:   3,
+		Dataset: "chat-history",
+	})
+	if err != nil || results.Count == 0 {
+		return
+	}
+
+	ctx := "Relevant prior context:\n"
+	for _, r := range results.Results {
+		ctx += fmt.Sprintf("- %s (relevance: %.0f%%)\n", r.Content, r.Score*100)
+	}
+	ctx += "\n"
+
+	if messages, ok := reqBody["messages"].([]interface{}); ok && len(messages) > 0 {
+		if first, ok := messages[0].(map[string]interface{}); ok {
+			if existing, ok := first["content"].(string); ok {
+				first["content"] = ctx + existing
+			}
+		}
+	} else if _, ok := reqBody["prompt"]; ok {
+		reqBody["prompt"] = ctx + reqBody["prompt"].(string)
+	}
+}
+
+func (p *Proxy) logInferenceToMemory(model, apiPath string, latencyMs int64, success bool) {
+	if p.memory == nil {
+		return
+	}
+	status := "success"
+	if !success {
+		status = "failure"
+	}
+	p.memory.Remember(memory.RememberRequest{
+		Content: fmt.Sprintf("Inference request to %s via %s: %dms: %s",
+			model, apiPath, latencyMs, status),
+		MemoryType: memory.MemoryTypeEvent,
+		Dataset:    "inference-log",
+		Metadata: map[string]any{
+			"model":      model,
+			"path":       apiPath,
+			"latency_ms": latencyMs,
+			"success":    success,
+			"node_id":    p.config.NodeID,
+		},
+	})
+}
+
 func (p *Proxy) handleSyncResponse(w http.ResponseWriter, req *queue.Request, body []byte, model string, apiPath string) {
 	node := p.balancer.SelectNode(model)
 	if node == nil {
@@ -117,7 +190,10 @@ func (p *Proxy) handleSyncResponse(w http.ResponseWriter, req *queue.Request, bo
 	p.active[req.ID] = req
 	p.mu.Unlock()
 
+	start := time.Now()
 	defer func() {
+		latency := time.Since(start).Milliseconds()
+		p.logInferenceToMemory(model, apiPath, latency, req.Status == queue.StatusComplete)
 		p.mu.Lock()
 		delete(p.active, req.ID)
 		p.mu.Unlock()
@@ -177,7 +253,10 @@ func (p *Proxy) handleStreamResponse(w http.ResponseWriter, req *queue.Request, 
 	p.active[req.ID] = req
 	p.mu.Unlock()
 
+	start := time.Now()
 	defer func() {
+		latency := time.Since(start).Milliseconds()
+		p.logInferenceToMemory(model, apiPath, latency, req.Status == queue.StatusComplete)
 		p.mu.Lock()
 		delete(p.active, req.ID)
 		p.mu.Unlock()
