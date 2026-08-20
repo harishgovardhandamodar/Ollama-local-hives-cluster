@@ -15,6 +15,22 @@ const (
 	PriorityLow      JobPriority = 3 // Background tasks - lowest priority
 )
 
+// String returns the string representation of JobPriority
+func (p JobPriority) String() string {
+	switch p {
+	case PriorityRealtime:
+		return "realtime"
+	case PriorityHigh:
+		return "high"
+	case PriorityNormal:
+		return "normal"
+	case PriorityLow:
+		return "low"
+	default:
+		return "unknown"
+	}
+}
+
 // PriorityQueue implements a multi-tier priority queue with deadline awareness
 type PriorityQueue struct {
 	mu       sync.Mutex
@@ -267,6 +283,33 @@ func (pq *PriorityQueue) Stats() map[string]interface{} {
 		"dequeued":   pq.dequeued,
 		"dropped":    pq.dropped,
 	}
+}
+
+// GetStats returns typed queue statistics for metrics
+func (pq *PriorityQueue) GetStats() QueueStats {
+	pq.mu.Lock()
+	defer pq.mu.Unlock()
+
+	return QueueStats{
+		RealtimeDepth: pq.queues[PriorityRealtime].len(),
+		HighDepth:     pq.queues[PriorityHigh].len(),
+		NormalDepth:   pq.queues[PriorityNormal].len(),
+		LowDepth:      pq.queues[PriorityLow].len(),
+		TotalEnqueued: pq.enqueued,
+		TotalDequeued: pq.dequeued,
+		TotalDropped:  pq.dropped,
+	}
+}
+
+// QueueStats holds typed queue statistics
+type QueueStats struct {
+	RealtimeDepth int
+	HighDepth     int
+	NormalDepth   int
+	LowDepth      int
+	TotalEnqueued int64
+	TotalDequeued int64
+	TotalDropped  int64
 }
 
 // DetermineJobPriority determines the appropriate priority for a job based on type and context
