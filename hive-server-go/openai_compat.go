@@ -90,11 +90,29 @@ func (hs *HiveServer) handleOpenAIChatCompletions(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Determine model — use request model or server default
-	model := req.Model
-	if model == "" {
-		model = hs.cfg.OllamaModel
+	// SMART MODEL SELECTION: Prefer already-loaded models
+	requestedModel := req.Model
+	if requestedModel == "" {
+		requestedModel = hs.cfg.OllamaModel
 	}
+	
+	// Use smart model selection to find best available model
+	selectedModel, selectedEndpoint, usedCompatible := hs.selectBestModel(requestedModel)
+	
+	if usedCompatible {
+		logInfo("Using compatible loaded model: %s instead of requested %s", selectedModel, requestedModel)
+	}
+	
+	// Override endpoint if different from local
+	endpoint := selectedEndpoint
+	if endpoint == "" {
+		endpoint = hs.cfg.OllamaURL
+	}
+	
+	model := selectedModel
+	
+	// Pass endpoint to streaming handler via context or parameter
+	// For now, we'll modify the streaming handler signature
 
 	// Extract system prompt and conversation messages
 	var systemPrompt string
@@ -125,7 +143,7 @@ func (hs *HiveServer) handleOpenAIChatCompletions(w http.ResponseWriter, r *http
 
 	// ── Streaming mode ─────────────────────────────────────────────
 	if req.Stream {
-		hs.handleOpenAIStream(w, model, conversationMsgs)
+		hs.handleOpenAIStreamWithEndpoint(w, model, endpoint, conversationMsgs)
 		return
 	}
 
@@ -174,6 +192,11 @@ func (hs *HiveServer) handleOpenAIChatCompletions(w http.ResponseWriter, r *http
 
 // handleOpenAIStream streams the response from Ollama as OpenAI SSE chunks
 func (hs *HiveServer) handleOpenAIStream(w http.ResponseWriter, model string, msgs []map[string]string) {
+	hs.handleOpenAIStreamWithEndpoint(w, model, hs.cfg.OllamaURL, msgs)
+}
+
+// handleOpenAIStreamWithEndpoint streams the response using a specific endpoint
+func (hs *HiveServer) handleOpenAIStreamWithEndpoint(w http.ResponseWriter, model, endpoint string, msgs []map[string]string) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -199,9 +222,9 @@ func (hs *HiveServer) handleOpenAIStream(w http.ResponseWriter, model string, ms
 		return
 	}
 
-	// Call Ollama with streaming
+	// Call Ollama with streaming - use selected endpoint
 	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := client.Post(hs.cfg.OllamaURL+"/api/chat", "application/json", bytes.NewReader(data))
+	resp, err := client.Post(endpoint+"/api/chat", "application/json", bytes.NewReader(data))
 	if err != nil {
 		writeSSEError(w, flusher, fmt.Sprintf("ollama request failed: %v", err))
 		return
@@ -419,7 +442,7 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 		return "", nil, err
 	}
 
-	// Submit as a chat job for queue visibility
+	// Submit as a chat job for queue visibility with priority
 	jobID := fmt.Sprintf("openai:%d", time.Now().UnixMilli())
 	jobPayload := map[string]interface{}{
 		"model":    model,
@@ -428,6 +451,10 @@ func (hs *HiveServer) handleOpenAIDirect(model string, msgs []map[string]string)
 	}
 
 	job := NewJob(jobID, "chat", "chat", jobPayload)
+	// Set priority based on context (assume interactive if coming from OpenAI API)
+	job.Priority = PriorityHigh
+	job.Deadline = time.Now().Add(600 * time.Second)
+	job.MaxRetries = 3
 	if !hs.queue.Submit(job) {
 		// Queue full — try forwarding to a less-loaded peer
 		if peer := hs.findPeerWithModel(model); peer != nil {
@@ -622,6 +649,39 @@ func (hs *HiveServer) callOllamaDirect(model string, data []byte) (string, *Open
 	}
 
 	return result.Message.Content, usage, nil
+}
+
+// selectBestModel implements smart model selection to prefer already-loaded models
+func (hs *HiveServer) selectBestModel(requestedModel string) (string, string, bool) {
+	// 1. Check if requested model is loaded locally
+	if hs.modelRegistry.IsLoadedLocally(requestedModel) {
+		hs.modelRegistry.MarkModelUsed(requestedModel, true, "")
+		return requestedModel, hs.cfg.OllamaURL, false
+	}
+
+	// 2. Find compatible local model (same family, different quantization/version)
+	if compatible := hs.modelRegistry.FindCompatibleLocalModel(requestedModel); compatible != nil {
+		hs.modelRegistry.MarkModelUsed(compatible.Name, true, "")
+		logInfo("Using compatible local model: %s instead of requested %s", compatible.Name, requestedModel)
+		return compatible.Name, compatible.Endpoint, true
+	}
+
+	// 3. Check mesh peers for loaded model
+	if peerNodeID, peerInfo := hs.modelRegistry.FindPeerWithLoadedModel(requestedModel); peerNodeID != "" {
+		hs.modelRegistry.MarkModelUsed(requestedModel, false, peerNodeID)
+		logInfo("Found model %s loaded on peer %s", requestedModel, peerNodeID)
+		return requestedModel, peerInfo.Endpoint, false
+	}
+
+	// 4. Check mesh peers for compatible model
+	if peerNodeID, peerInfo := hs.modelRegistry.FindPeerWithCompatibleModel(requestedModel); peerNodeID != "" {
+		hs.modelRegistry.MarkModelUsed(peerInfo.Name, false, peerNodeID)
+		logInfo("Using compatible model %s on peer %s instead of requested %s", peerInfo.Name, peerNodeID, requestedModel)
+		return peerInfo.Name, peerInfo.Endpoint, true
+	}
+
+	// 5. Fall back to default loading (model will be loaded on request)
+	return requestedModel, hs.cfg.OllamaURL, false
 }
 
 // handleOpenAIListModels handles GET /v1/models

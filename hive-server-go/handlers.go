@@ -17,12 +17,13 @@ var (
 )
 
 type HiveServer struct {
-	queue        *OllamaQueue
-	mesh         *MeshDiscovery
-	clients      *ClientManager
-	cfg          ServerConfig
-	provider     *ProviderManager
-	codingAgent  *CodingAgentManager
+	queue         *OllamaQueue
+	mesh          *MeshDiscovery
+	clients       *ClientManager
+	cfg           ServerConfig
+	provider      *ProviderManager
+	codingAgent   *CodingAgentManager
+	modelRegistry *ModelRegistry
 }
 
 type ClientManager struct {
@@ -142,11 +143,16 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 			cfg.OllamaModel,
 		)
 	}
+	
+	// Initialize model registry for tracking loaded models across the mesh
+	modelRegistry := NewModelRegistry()
+	
 	provider := NewProviderManager(
 		getServerID(),
 		cfg.ServerPort,
 		cfg.OllamaURL,
 		cfg.CustomProviderURLs,
+		modelRegistry, // Pass registry to register loaded models
 	)
 
 	var cam *CodingAgentManager
@@ -155,12 +161,13 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 	}
 
 	return &HiveServer{
-		queue:       queue,
-		mesh:        mesh,
-		clients:     NewClientManager(cfg.MaxClients),
-		cfg:         cfg,
-		provider:    provider,
-		codingAgent: cam,
+		queue:         queue,
+		mesh:          mesh,
+		clients:       NewClientManager(cfg.MaxClients),
+		cfg:           cfg,
+		provider:      provider,
+		codingAgent:   cam,
+		modelRegistry: modelRegistry,
 	}
 }
 
