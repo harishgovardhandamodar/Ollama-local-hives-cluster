@@ -470,7 +470,7 @@ func (q *OllamaQueue) GetQueueStatus() map[string]interface{} {
 func (q *OllamaQueue) GetAvailableCapacity() int {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return max(0, q.maxConcurrent-len(q.running))
+	return maxInt(0, q.maxConcurrent-len(q.running))
 }
 
 func (q *OllamaQueue) GetJob(jobID string) *Job {

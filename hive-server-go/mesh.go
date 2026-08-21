@@ -510,7 +510,7 @@ func (m *MeshDiscovery) GetAlivePeers() []*PeerInfo {
 	for _, p := range m.peers {
 		if now()-p.LastSeen < 30 {
 			p.Alive = true
-			p.AvailableCap = max(0, p.MaxConcurrent-p.RunningJobs)
+			p.AvailableCap = maxInt(0, p.MaxConcurrent-p.RunningJobs)
 			p.Load = calcLoad(p.RunningJobs, p.PendingJobs, p.MaxConcurrent)
 			alive = append(alive, p)
 		}

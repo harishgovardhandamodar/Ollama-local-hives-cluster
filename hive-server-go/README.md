@@ -1,16 +1,28 @@
 # Hive Server Go
 
-A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features concurrent job queuing, peer mesh discovery, GPU-aware hardware metrics, SQLite-backed token usage reporting, a live dashboard, **OpenAI-compatible API**, and a **Coding Agent API** with session management and context compression.
+A production-grade Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features intelligent model loading optimization, priority-based job queuing with deadline awareness, peer mesh discovery with circuit breaker fault tolerance, response caching, comprehensive Prometheus metrics, GPU-aware hardware metrics, SQLite-backed token usage reporting, a live dashboard, **OpenAI-compatible API**, and a **Coding Agent API** with session management and context compression.
 
 ## Features
 
+### Core Intelligence
+- **Smart Model Selection** — Automatically prefers already-loaded models across the mesh, supports compatible model substitution (e.g., `llama3.1:8b` for `llama3:8b` request)
+- **Model Registry** — Tracks loaded models across all mesh peers with reference counting, load state, and usage metrics
+- **Priority Queue System** — Four-tier priority levels (Realtime, High, Normal, Low) with deadline-aware scheduling
+- **Circuit Breaker Pattern** — Automatic fault detection and recovery for failing providers/peers
+- **Response Caching** — Semantic cache for repeated prompts with LRU eviction
+
+### Infrastructure
 - **Job Queue** — Goroutine worker pool with configurable concurrency, Ollama proxy, token tracking
 - **Mesh Discovery** — UDP broadcast peer discovery, seed peers, cross-platform model mapping (MLX→NVIDIA)
+- **Provider Abstraction** — Unified interface for Ollama, vLLM, LM Studio, OpenAI with health monitoring
+- **Live Dashboard** — Real-time stats, queue depth by priority, mesh topology, token usage charts, live logs
+- **SQLite Persistence** — Token usage, coding agent sessions/messages/audit logs, job history
+
+### API & Integration
 - **OpenAI-Compatible API** — `/v1/chat/completions` (streaming + non-streaming), `/v1/models` (local + peer), `/v1/health`
 - **Coding Agent API** — Session-based context management, auto-compression, audit logging for Hermes/OpenCode/Codex
+- **Prometheus Metrics** — Comprehensive observability with 20+ metrics for monitoring and alerting
 - **Auto-Forwarding** — When a model isn't found locally, requests are automatically forwarded to the peer that has it
-- **Live Dashboard** — Real-time stats, queue, mesh topology, token usage charts, live logs
-- **SQLite Persistence** — Token usage, coding agent sessions/messages/audit logs
 
 ## Quick Start
 
@@ -62,6 +74,22 @@ Open http://localhost:8081 for the dashboard.
 | `SERVER_ID` | `hostname` | Unique server identifier |
 | `CUSTOM_PROVIDER_URLS` | — | Comma-separated OpenAI-compatible API URLs |
 | `HIVE_DB_PATH` | `/data/hive-server.db` | SQLite database path |
+
+### Advanced Configuration (Phases 1-4 Features)
+
+| Env Variable | Default | Description |
+|---|---|---|
+| `PRIORITY_QUEUE_ENABLED` | `true` | Enable priority-based job scheduling |
+| `MODEL_REGISTRY_ENABLED` | `true` | Enable smart model selection and registry |
+| `CIRCUIT_BREAKER_ENABLED` | `true` | Enable fault tolerance with circuit breakers |
+| `RESPONSE_CACHE_ENABLED` | `true` | Enable semantic response caching |
+| `CACHE_MAX_SIZE` | `1000` | Maximum cache entries |
+| `CACHE_TTL_SECONDS` | `3600` | Cache time-to-live in seconds |
+| `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics endpoint |
+| `PROMETHEUS_PORT` | `9090` | Prometheus metrics port |
+| `ROUTING_STRATEGY` | `loaded-first` | Routing strategy: `loaded-first`, `latency`, `load`, `round-robin` |
+| `PREFER_LOADED_MODELS` | `true` | Prefer already-loaded models over requested ones |
+| `MODEL_COMPATIBILITY` | `true` | Allow compatible model substitution |
 
 ### Cross-Platform Model Mapping
 
