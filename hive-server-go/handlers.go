@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -17,13 +18,18 @@ var (
 )
 
 type HiveServer struct {
-	queue         *OllamaQueue
-	mesh          *MeshDiscovery
-	clients       *ClientManager
-	cfg           ServerConfig
-	provider      *ProviderManager
-	codingAgent   *CodingAgentManager
-	modelRegistry *ModelRegistry
+	queue          *PriorityQueue
+	mesh           *MeshDiscovery
+	clients        *ClientManager
+	cfg            ServerConfig
+	providerMgr    *ProviderManager
+	codingAgent    *CodingAgentManager
+	modelRegistry  *ModelRegistry
+	cache          *ResponseCache
+	circuitBreaker *CircuitBreakerManager
+	metrics        *MetricsManager
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 type ClientManager struct {
@@ -132,7 +138,12 @@ func (cm *ClientManager) IncrementCompleted(clientID string) {
 }
 
 func NewHiveServer(cfg ServerConfig) *HiveServer {
-	queue := NewOllamaQueue(cfg.MaxConcurrent, cfg.OllamaURL, cfg.OllamaModel)
+	// Initialize context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	// Initialize priority queue with 4 tiers
+	queue := NewPriorityQueue()
+	
 	var mesh *MeshDiscovery
 	if cfg.MeshEnabled {
 		mesh = NewMeshDiscovery(
@@ -147,27 +158,76 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 	// Initialize model registry for tracking loaded models across the mesh
 	modelRegistry := NewModelRegistry()
 	
-	provider := NewProviderManager(
+	// Initialize response cache
+	cache, err := NewResponseCache(CacheConfig{
+		MaxEntries:   int64(getEnvInt("CACHE_MAX_ITEMS", 1000)),
+		TTLDuration:  time.Duration(getEnvInt("CACHE_TTL_SECONDS", 300)) * time.Second,
+		EnableSemantic: true,
+	})
+	if err != nil {
+		logError("Failed to initialize cache: %v", err)
+		cache = NewResponseCacheNoop()
+	}
+	
+	// Initialize circuit breaker manager
+	circuitBreaker := NewCircuitBreakerManager()
+	// Configure circuit breakers via environment
+	circuitBreaker.SetConfig(CircuitBreakerConfig{
+		FailureThreshold: getEnvInt("CB_FAILURE_THRESHOLD", 5),
+		Timeout:          time.Duration(getEnvInt("CB_TIMEOUT_SECONDS", 30)) * time.Second,
+	})
+	
+	// Initialize metrics manager
+	metrics := NewMetricsManager()
+	
+	// Initialize provider manager with model registry
+	providerMgr := NewProviderManager(
 		getServerID(),
 		cfg.ServerPort,
 		cfg.OllamaURL,
 		cfg.CustomProviderURLs,
-		modelRegistry, // Pass registry to register loaded models
+		modelRegistry,
 	)
+	
+	// Set circuit breaker and metrics on provider manager (if available)
+	if providerMgr != nil {
+		providerMgr.SetCircuitBreaker(circuitBreaker)
+		providerMgr.SetMetrics(metrics)
+	}
+	
+	// Set up mesh callbacks for queue status and model info
+	if mesh != nil {
+		mesh.SetCallbacks(
+			func() QueueStatus {
+				return queue.GetStats()
+			},
+			func() int {
+				return cfg.MaxConcurrent - int(queue.GetActiveCount())
+			},
+			func() []LoadedModelInfo {
+				return modelRegistry.GetAllLocalModels()
+			},
+		)
+	}
 
 	var cam *CodingAgentManager
 	if defaultDB != nil {
-		cam = NewCodingAgentManager(defaultDB, queue, mesh, getServerID())
+		cam = NewCodingAgentManager(defaultDB, nil, mesh, getServerID()) // TODO: Update coding agent to use priority queue
 	}
 
 	return &HiveServer{
-		queue:         queue,
-		mesh:          mesh,
-		clients:       NewClientManager(cfg.MaxClients),
-		cfg:           cfg,
-		provider:      provider,
-		codingAgent:   cam,
-		modelRegistry: modelRegistry,
+		queue:          queue,
+		mesh:           mesh,
+		clients:        NewClientManager(cfg.MaxClients),
+		cfg:            cfg,
+		providerMgr:    providerMgr,
+		codingAgent:    cam,
+		modelRegistry:  modelRegistry,
+		cache:          cache,
+		circuitBreaker: circuitBreaker,
+		metrics:        metrics,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 
