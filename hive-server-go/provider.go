@@ -45,25 +45,27 @@ type NodeInfo struct {
 }
 
 type ProviderManager struct {
-	mu          sync.RWMutex
-	selfID      string
-	selfPort    int
-	ollamaURL   string
-	customURLs  []string
-	nodesCache  []NodeInfo
-	lastRefresh time.Time
-	interval    time.Duration
-	client      *http.Client
+	mu            sync.RWMutex
+	selfID        string
+	selfPort      int
+	ollamaURL     string
+	customURLs    []string
+	nodesCache    []NodeInfo
+	lastRefresh   time.Time
+	interval      time.Duration
+	client        *http.Client
+	modelRegistry *ModelRegistry
 }
 
-func NewProviderManager(selfID string, selfPort int, ollamaURL string, customURLs []string) *ProviderManager {
+func NewProviderManager(selfID string, selfPort int, ollamaURL string, customURLs []string, modelRegistry *ModelRegistry) *ProviderManager {
 	return &ProviderManager{
-		selfID:     selfID,
-		selfPort:   selfPort,
-		ollamaURL:  ollamaURL,
-		customURLs: customURLs,
-		interval:   30 * time.Second,
-		client:     &http.Client{Timeout: 5 * time.Second},
+		selfID:        selfID,
+		selfPort:      selfPort,
+		ollamaURL:     ollamaURL,
+		customURLs:    customURLs,
+		interval:      30 * time.Second,
+		client:        &http.Client{Timeout: 5 * time.Second},
+		modelRegistry: modelRegistry,
 	}
 }
 
@@ -169,8 +171,15 @@ func (pm *ProviderManager) probeOllama(baseURL, nodeID string) *ProviderInfo {
 
 	var result struct {
 		Models []struct {
-			Name string `json:"name"`
-			Size int64  `json:"size"`
+			Name    string `json:"name"`
+			Size    int64  `json:"size"`
+			Digest  string `json:"digest"`
+			Details struct {
+				Format         string `json:"format"`
+				Family         string `json:"family"`
+				ParameterSize  string `json:"parameter_size"`
+				QuantizationLevel string `json:"quantization_level"`
+			} `json:"details"`
 		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -189,6 +198,17 @@ func (pm *ProviderManager) probeOllama(baseURL, nodeID string) *ProviderInfo {
 			NodeID:   nodeID,
 			SizeGB:   sizeGB,
 		})
+		
+		// Register loaded model in registry for smart routing
+		if pm.modelRegistry != nil {
+			pm.modelRegistry.RegisterLocalModel(
+				m.Name,
+				string(ProviderOllama),
+				baseURL,
+				m.Size,
+				0, // Context length would require additional API call
+			)
+		}
 	}
 
 	return &ProviderInfo{
