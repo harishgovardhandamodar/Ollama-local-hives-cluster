@@ -320,7 +320,7 @@ func (hs *HiveServer) handleClientRegister(w http.ResponseWriter, r *http.Reques
 }
 
 func (hs *HiveServer) handleClientHeartbeatPath(w http.ResponseWriter, r *http.Request) {
-	clientID := r.PathValue("client_id")
+	clientID := r.URL.Query().Get("client_id")
 	if clientID == "" {
 		var body struct {
 			ClientID string `json:"client_id"`
@@ -412,7 +412,7 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (hs *HiveServer) handleJobGet(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
+	jobID := r.URL.Query().Get("job_id")
 	job := hs.queue.GetJob(jobID)
 	if job == nil {
 		http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)
@@ -872,7 +872,7 @@ func (hs *HiveServer) handleAgentSessionList(w http.ResponseWriter, r *http.Requ
 }
 
 func (hs *HiveServer) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -890,7 +890,7 @@ func (hs *HiveServer) handleAgentSessionGet(w http.ResponseWriter, r *http.Reque
 }
 
 func (hs *HiveServer) handleAgentSessionDelete(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -911,7 +911,7 @@ func (hs *HiveServer) handleAgentSessionArchive(w http.ResponseWriter, r *http.R
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -932,7 +932,7 @@ func (hs *HiveServer) handleAgentMessageSend(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -976,7 +976,7 @@ func (hs *HiveServer) handleAgentMessageSend(w http.ResponseWriter, r *http.Requ
 }
 
 func (hs *HiveServer) handleAgentMessagesGet(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -1002,7 +1002,7 @@ func (hs *HiveServer) handleAgentMessagesGet(w http.ResponseWriter, r *http.Requ
 }
 
 func (hs *HiveServer) handleAgentContextStats(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -1020,7 +1020,7 @@ func (hs *HiveServer) handleAgentContextStats(w http.ResponseWriter, r *http.Req
 }
 
 func (hs *HiveServer) handleAgentAuditLogs(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return

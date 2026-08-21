@@ -4,7 +4,6 @@ go 1.19
 
 require (
 	github.com/dgraph-io/ristretto v0.1.1
-	github.com/google/uuid v1.3.0
 	github.com/prometheus/client_golang v1.15.1
 	modernc.org/sqlite v1.20.0
 )
@@ -15,6 +14,7 @@ require (
 	github.com/dustin/go-humanize v1.0.0 // indirect
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b // indirect
 	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/google/uuid v1.3.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
 	github.com/mattn/go-isatty v0.0.16 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
