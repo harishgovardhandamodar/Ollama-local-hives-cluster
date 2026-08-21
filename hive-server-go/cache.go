@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dgraph-io/ristretto/v2"
+	"github.com/dgraph-io/ristretto"
 )
 
 // CacheEntry represents a cached response with metadata

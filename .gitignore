@@ -1,70 +1,63 @@
 ```
-# Go-specific ignores
+# Build artifacts
 *.o
-*.a
-*.so
-*.dylib
-*.dll
+*.obj
 *.exe
+*.dll
+*.so
+*.a
 *.out
-*.test
-
-# Go build/cache directories
-bin/
-pkg/
-vendor/
 
 # Dependencies
-node_modules/
 vendor/
 
-# Logs and temp files
+# Logs
 *.log
-*.tmp
-*.swp
 
 # Environment
 .env
 .env.local
-.env.*
+*.env.*
 
 # Editors
 .vscode/
 .idea/
 *.swp
 *.swo
+*.tmp
 
 # Coverage
 coverage/
 htmlcov/
 .coverage
 
-# Build artifacts
-build/
+# Distribution
 dist/
+build/
 target/
 
-# Python (if mixed project)
+# Python specific
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
-venv/
-.venv/
-.env
+*.so
+.PyInstaller/
+.pytest_cache/
+.mypy_cache/
 
-# Java (if mixed project)
-*.class
-*.jar
-*.war
-*.ear
-*.nar
-target/
-.gradle/
-build/
+# Go specific
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.prof
+cover.out
+go.work.sum
 
-# Compressed files
+# Archives
 *.zip
 *.gz
 *.tar
@@ -87,4 +80,8 @@ build/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
+
+# OS generated
+.DS_Store
+Thumbs.db
 ```
