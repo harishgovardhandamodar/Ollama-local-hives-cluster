@@ -1,146 +1,207 @@
 package main
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"sync"
-	"time"
+"crypto/sha256"
+"encoding/hex"
+"fmt"
+"sync"
+"time"
+
+"github.com/dgraph-io/ristretto"
 )
 
+// CacheEntry represents a cached response with metadata
 type CacheEntry struct {
-	Key       string
-	Value     interface{}
-	CreatedAt time.Time
-	HitCount  int
+Response     string
+Model        string
+Tokens       int
+CreatedAt    time.Time
+LastAccessed time.Time
+AccessCount  int
 }
 
+// CacheConfig holds configuration for the response cache
+type CacheConfig struct {
+MaxEntries  int64
+EnableSemantic bool
+TTLDuration time.Duration
+}
+
+// CacheStats holds metrics for monitoring
+type CacheStats struct {
+Hits         int64 `json:"hits"`
+Misses       int64 `json:"misses"`
+SemanticHits int64 `json:"semantic_hits"`
+Size         int64 `json:"size"`
+Cost         int64 `json:"cost"`
+}
+
+// SemanticIndex provides simple semantic search capability
+type SemanticIndex struct {
+mu         sync.RWMutex
+embeddings map[string][]float64
+indexed    map[string]bool
+}
+
+// ResponseCache provides LLM response caching with TTL
 type ResponseCache struct {
-	mu         sync.RWMutex
-	entries    map[string]*CacheEntry
-	maxEntries int
-	ttl        time.Duration
-	hits       int64
-	misses     int64
+mu          sync.RWMutex
+cache       *ristretto.Cache
+config      CacheConfig
+stats       CacheStats
+semIndex    *SemanticIndex
+stopCleanup chan struct{}
+cleanupDone chan struct{}
+items       map[string]*CacheEntry // Track items for cleanup
 }
 
-func NewResponseCache(maxEntries int, ttlSeconds int) *ResponseCache {
-	if maxEntries <= 0 {
-		maxEntries = 1000
-	}
-	if ttlSeconds <= 0 {
-		ttlSeconds = 300 // 5 minutes default
-	}
-
-	cache := &ResponseCache{
-		entries:    make(map[string]*CacheEntry),
-		maxEntries: maxEntries,
-		ttl:        time.Duration(ttlSeconds) * time.Second,
-	}
-	go cache.evictLoop()
-	return cache
+// NewResponseCache creates a new response cache
+func NewResponseCache(config CacheConfig) (*ResponseCache, error) {
+cache, err := ristretto.NewCache(&ristretto.Config{
+NumCounters: config.MaxEntries * 10,
+MaxCost:     config.MaxEntries,
+BufferItems: 64,
+Cost: func(value interface{}) int64 {
+return 1
+},
+})
+if err != nil {
+return nil, fmt.Errorf("failed to create cache: %w", err)
 }
 
-func (c *ResponseCache) GenerateKey(model string, messages []map[string]string) string {
-	// Create a deterministic key from model + messages
-	h := sha256.New()
-	h.Write([]byte(model))
-	for _, m := range messages {
-		h.Write([]byte(m["role"]))
-		h.Write([]byte(m["content"]))
-	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+rc := &ResponseCache{
+cache:       cache,
+config:      config,
+stats:       CacheStats{},
+stopCleanup: make(chan struct{}),
+cleanupDone: make(chan struct{}),
+items:       make(map[string]*CacheEntry),
 }
 
-func (c *ResponseCache) Get(key string) (interface{}, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	entry, exists := c.entries[key]
-	if !exists {
-		c.misses++
-		return nil, false
-	}
-
-	if time.Since(entry.CreatedAt) > c.ttl {
-		c.misses++
-		return nil, false
-	}
-
-	entry.HitCount++
-	c.hits++
-	return entry.Value, true
+go rc.cleanupLoop()
+return rc, nil
 }
 
-func (c *ResponseCache) Set(key string, value interface{}) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Evict oldest if at capacity
-	if len(c.entries) >= c.maxEntries {
-		var oldestKey string
-		var oldestTime time.Time
-		for k, v := range c.entries {
-			if oldestKey == "" || v.CreatedAt.Before(oldestTime) {
-				oldestKey = k
-				oldestTime = v.CreatedAt
-			}
-		}
-		if oldestKey != "" {
-			delete(c.entries, oldestKey)
-		}
-	}
-
-	c.entries[key] = &CacheEntry{
-		Key:       key,
-		Value:     value,
-		CreatedAt: time.Now(),
-	}
+// GenerateCacheKey creates a unique key for a request
+func (rc *ResponseCache) GenerateCacheKey(model, systemPrompt, userMessage string) string {
+hash := sha256.New()
+hash.Write([]byte(fmt.Sprintf("%s|%s|%s", model, systemPrompt, userMessage)))
+return hex.EncodeToString(hash.Sum(nil))
 }
 
-func (c *ResponseCache) Stats() map[string]interface{} {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+// Get retrieves a cached response if available
+func (rc *ResponseCache) Get(model, systemPrompt, userMessage string) (*CacheEntry, bool) {
+key := rc.GenerateCacheKey(model, systemPrompt, userMessage)
 
-	var hitRate float64
-	if c.hits+c.misses > 0 {
-		hitRate = float64(c.hits) / float64(c.hits+c.misses)
-	}
+rc.mu.Lock()
+rc.stats.Misses++
+rc.mu.Unlock()
 
-	return map[string]interface{}{
-		"entries":    len(c.entries),
-		"max_entries": c.maxEntries,
-		"hits":       c.hits,
-		"misses":     c.misses,
-		"hit_rate":   hitRate,
-		"ttl_seconds": int(c.ttl.Seconds()),
-	}
+value, found := rc.cache.Get(key)
+if !found {
+rc.mu.Lock()
+rc.stats.Misses--
+rc.mu.Unlock()
+return nil, false
 }
 
-func (c *ResponseCache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries = make(map[string]*CacheEntry)
-	c.hits = 0
-	c.misses = 0
+entry, ok := value.(*CacheEntry)
+if !ok {
+rc.mu.Lock()
+rc.stats.Misses--
+rc.mu.Unlock()
+return nil, false
 }
 
-func (c *ResponseCache) evictLoop() {
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-	for range ticker.C {
-		c.mu.Lock()
-		now := time.Now()
-		for key, entry := range c.entries {
-			if now.Sub(entry.CreatedAt) > c.ttl {
-				delete(c.entries, key)
-			}
-		}
-		c.mu.Unlock()
-	}
+rc.mu.Lock()
+entry.AccessCount++
+entry.LastAccessed = time.Now()
+rc.stats.Hits++
+rc.mu.Unlock()
+
+return entry, true
 }
 
-// CachedChatResponse wraps a chat response for caching
-type CachedChatResponse struct {
-	Content string
-	Usage   *OpenAIUsage
+// Set stores a response in the cache
+func (rc *ResponseCache) Set(model, systemPrompt, userMessage, response string, tokens int) {
+key := rc.GenerateCacheKey(model, systemPrompt, userMessage)
+entry := &CacheEntry{
+Response:     response,
+Model:        model,
+Tokens:       tokens,
+CreatedAt:    time.Now(),
+LastAccessed: time.Now(),
+AccessCount:  1,
+}
+
+rc.cache.Set(key, entry, 1)
+
+rc.mu.Lock()
+rc.items[key] = entry
+rc.mu.Unlock()
+}
+
+// Delete removes an entry from the cache
+func (rc *ResponseCache) Delete(model, systemPrompt, userMessage string) {
+key := rc.GenerateCacheKey(model, systemPrompt, userMessage)
+rc.cache.Del(key)
+
+rc.mu.Lock()
+delete(rc.items, key)
+rc.mu.Unlock()
+}
+
+// Stats returns current cache statistics
+func (rc *ResponseCache) Stats() CacheStats {
+rc.mu.RLock()
+defer rc.mu.RUnlock()
+
+size := int64(len(rc.items))
+rc.stats.Size = size
+rc.stats.Cost = size
+
+return rc.stats
+}
+
+// Clear removes all entries from the cache
+func (rc *ResponseCache) Clear() {
+rc.cache.Clear()
+rc.mu.Lock()
+rc.items = make(map[string]*CacheEntry)
+rc.mu.Unlock()
+}
+
+// Close shuts down the cache gracefully
+func (rc *ResponseCache) Close() {
+close(rc.stopCleanup)
+<-rc.cleanupDone
+rc.cache.Close()
+}
+
+func (rc *ResponseCache) cleanupLoop() {
+defer close(rc.cleanupDone)
+ticker := time.NewTicker(1 * time.Minute)
+defer ticker.Stop()
+
+for {
+select {
+case <-ticker.C:
+rc.cleanupExpired()
+case <-rc.stopCleanup:
+return
+}
+}
+}
+
+func (rc *ResponseCache) cleanupExpired() {
+now := time.Now()
+rc.mu.Lock()
+defer rc.mu.Unlock()
+
+for key, entry := range rc.items {
+if now.Sub(entry.CreatedAt) > rc.config.TTLDuration {
+rc.cache.Del(key)
+delete(rc.items, key)
+}
+}
 }

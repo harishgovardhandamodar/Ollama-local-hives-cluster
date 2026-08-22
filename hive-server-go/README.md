@@ -1,572 +1,296 @@
 # Hive Server Go
 
-A standalone Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features concurrent job queuing, peer mesh discovery, GPU-aware hardware metrics, SQLite-backed token usage reporting, a live dashboard, **OpenAI-compatible API**, **Coding Agent API**, and **enterprise-grade hardening**.
+A production-grade Go inference orchestration server for Ollama, LM Studio, vLLM, and OpenAI-compatible providers. Features intelligent model loading optimization, priority-based job queuing with deadline awareness, peer mesh discovery with circuit breaker fault tolerance, response caching, comprehensive Prometheus metrics, GPU-aware hardware metrics, SQLite-backed token usage reporting, a live dashboard, **OpenAI-compatible API**, and a **Coding Agent API** with session management and context compression.
 
 ## Features
 
-- **Job Queue** — Goroutine worker pool with configurable concurrency, priority queues, Ollama proxy, token tracking
-- **Mesh Discovery** — UDP broadcast peer discovery, seed peers, cross-platform model mapping (MLX→NVIDIA), active health polling
+### Core Intelligence
+- **Smart Model Selection** — Automatically prefers already-loaded models across the mesh, supports compatible model substitution (e.g., `llama3.1:8b` for `llama3:8b` request)
+- **Model Registry** — Tracks loaded models across all mesh peers with reference counting, load state, and usage metrics
+- **Priority Queue System** — Four-tier priority levels (Realtime, High, Normal, Low) with deadline-aware scheduling
+- **Circuit Breaker Pattern** — Automatic fault detection and recovery for failing providers/peers
+- **Response Caching** — Semantic cache for repeated prompts with LRU eviction
+
+### Infrastructure
+- **Job Queue** — Goroutine worker pool with configurable concurrency, Ollama proxy, token tracking
+- **Mesh Discovery** — UDP broadcast peer discovery, seed peers, cross-platform model mapping (MLX→NVIDIA)
+- **Provider Abstraction** — Unified interface for Ollama, vLLM, LM Studio, OpenAI with health monitoring
+- **Live Dashboard** — Real-time stats, queue depth by priority, mesh topology, token usage charts, live logs
+- **SQLite Persistence** — Token usage, coding agent sessions/messages/audit logs, job history
+
+### API & Integration
 - **OpenAI-Compatible API** — `/v1/chat/completions` (streaming + non-streaming), `/v1/models` (local + peer), `/v1/health`
 - **Coding Agent API** — Session-based context management, auto-compression, audit logging for Hermes/OpenCode/Codex
+- **Prometheus Metrics** — Comprehensive observability with 20+ metrics for monitoring and alerting
 - **Auto-Forwarding** — When a model isn't found locally, requests are automatically forwarded to the peer that has it
-- **Enterprise Security** — API key authentication, rate limiting, structured JSON logging
-- **Audit Trail** — Every request captured with full lifecycle, prompt, model, timing. Viewable as dashboard timeline overlay with expandable event graph
-- **Response Cache** — Prompt-hash based caching with configurable TTL for repeated queries
-- **Metrics** — Prometheus-compatible `/metrics` endpoint with counters, gauges, and histograms
-- **Live Dashboard** — Real-time stats, queue, mesh topology, token usage charts, live logs
 
 ## Quick Start
 
-### Docker Compose (Recommended)
-
 ```sh
-# Clone and start the full stack
-git clone https://github.com/harishgovardhandamodar/hive-serving-local-Cluster.git
-cd hive-serving-local-Cluster
+# Local
+go build -o hive-server-go ./hive-server-go/
+OLLAMA_BASE_URL=http://localhost:11434 ./hive-server-go
 
-# Start with Docker Compose
-docker compose up -d
-
-# Check status
-docker compose ps
-curl http://localhost:8081/api/status
-```
-
-### Docker (Manual)
-
-```sh
-# Basic server
+# Docker with persistent database
 docker run -d --name hive-server \
   -p 8081:8081 \
   -p 8082:8082/udp \
   -v hive-data:/data \
   -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
   -e OLLAMA_MODEL=llama3.1:8b \
-  hive-server-go:latest
-
-# With authentication
-docker run -d --name hive-server \
-  -p 8081:8081 \
-  -v hive-data:/data \
-  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
-  -e HIVE_API_KEY=your-secret-key \
-  -e HIVE_RATE_LIMIT=100 \
-  hive-server-go:latest
-
-# With mesh networking
-docker run -d --name hive-server \
-  -p 8081:8081 \
-  -p 8082:8082/udp \
-  -v hive-data:/data \
-  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
   -e MESH_ENABLED=true \
   -e MESH_SEED_PEERS="192.168.1.100:8081" \
   -e MESH_ANNOUNCE_ADDRESS="192.168.1.50:8081" \
   -e MESH_MODEL_MAP="gemma4:31b-mlx->gemma4:31b" \
   hive-server-go:latest
-```
 
-### Local Build
-
-```sh
-go build -o hive-server-go ./hive-server-go/
-OLLAMA_BASE_URL=http://localhost:11434 ./hive-server-go
+# Docker with Nvidia GPU (Linux)
+docker run -d --name hive-server --gpus all --network host \
+  -p 8081:8081 -p 8082:8082/udp \
+  -v hive-data:/data \
+  -e OLLAMA_BASE_URL=http://localhost:11434 \
+  -e MESH_ENABLED=true \
+  -e MESH_SEED_PEERS="192.168.1.100:8081" \
+  -e MESH_ANNOUNCE_ADDRESS="192.168.1.50:8081" \
+  hive-server-go:latest
 ```
 
 Open http://localhost:8081 for the dashboard.
 
 ## Configuration
 
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
+| Env Variable | Default | Description |
+|---|---|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Default model for inference |
+| `OLLAMA_MODEL` | `llama3.1:8b` | Default model for inference jobs |
 | `SERVER_PORT` | `8081` | HTTP server port |
-| `MAX_CONCURRENT` | `2` | Max concurrent jobs |
+| `MAX_CONCURRENT` | `2` | Max concurrent inference jobs |
 | `MAX_CLIENTS` | `5` | Max registered clients |
 | `MESH_ENABLED` | `true` | Enable UDP peer discovery |
 | `MESH_DISCOVERY_PORT` | `8082` | UDP discovery port |
 | `MESH_SEED_PEERS` | — | Comma-separated seed peer addresses |
-| `MESH_ANNOUNCE_ADDRESS` | auto | LAN IP:port for beacons (required in Docker) |
-| `MESH_MODEL_MAP` | — | Cross-platform model mapping (e.g., `mlx->nvidia`) |
-| `HIVE_API_KEY` | — | API key for authentication |
-| `HIVE_RATE_LIMIT` | `100` | Requests per minute per IP |
-| `HIVE_CACHE_ENABLED` | `false` | Enable response caching |
-| `HIVE_CACHE_MAX_ENTRIES` | `1000` | Max cache entries |
-| `HIVE_CACHE_TTL_SECONDS` | `300` | Cache TTL in seconds |
-| `HIVE_LOG_JSON` | `false` | Enable structured JSON logging |
+| `MESH_ANNOUNCE_ADDRESS` | auto-detected | LAN IP:port for beacon announcements (required in Docker) |
+| `MESH_MODEL_MAP` | — | Cross-platform model remapping (e.g. `gemma4:31b-mlx->gemma4:31b`) |
+| `SERVER_ID` | `hostname` | Unique server identifier |
+| `CUSTOM_PROVIDER_URLS` | — | Comma-separated OpenAI-compatible API URLs |
 | `HIVE_DB_PATH` | `/data/hive-server.db` | SQLite database path |
-| `HIVE_CONFIG` | `hive.yaml` | YAML config file path |
 
-### YAML Config File
+### Advanced Configuration (Phases 1-4 Features)
 
-Create `hive.yaml` in the working directory:
-
-```yaml
-server:
-  port: 8081
-  ollama_url: http://localhost:11434
-  ollama_model: llama3.1:8b
-  max_concurrent: 4
-  max_clients: 10
-  api_key: your-secret-key
-
-mesh:
-  enabled: true
-  discovery_port: 8082
-  announce_address: 192.168.1.50:8081
-  seed_peers: "192.168.1.100:8081"
-  model_map: "gemma4:31b-mlx->gemma4:31b"
-
-database:
-  path: /data/hive-server.db
-
-cache:
-  enabled: true
-  max_entries: 2000
-  ttl_seconds: 600
-
-logging:
-  json: true
-
-custom_providers:
-  - http://localhost:1234/v1
-```
-
-Environment variables override YAML config values.
+| Env Variable | Default | Description |
+|---|---|---|
+| `PRIORITY_QUEUE_ENABLED` | `true` | Enable priority-based job scheduling |
+| `MODEL_REGISTRY_ENABLED` | `true` | Enable smart model selection and registry |
+| `CIRCUIT_BREAKER_ENABLED` | `true` | Enable fault tolerance with circuit breakers |
+| `RESPONSE_CACHE_ENABLED` | `true` | Enable semantic response caching |
+| `CACHE_MAX_SIZE` | `1000` | Maximum cache entries |
+| `CACHE_TTL_SECONDS` | `3600` | Cache time-to-live in seconds |
+| `PROMETHEUS_ENABLED` | `true` | Enable Prometheus metrics endpoint |
+| `PROMETHEUS_PORT` | `9090` | Prometheus metrics port |
+| `ROUTING_STRATEGY` | `loaded-first` | Routing strategy: `loaded-first`, `latency`, `load`, `round-robin` |
+| `PREFER_LOADED_MODELS` | `true` | Prefer already-loaded models over requested ones |
+| `MODEL_COMPATIBILITY` | `true` | Allow compatible model substitution |
 
 ### Cross-Platform Model Mapping
 
-When your mesh has mixed hardware (MLX on Mac, NVIDIA on Linux):
+When your mesh has mixed hardware (MLX on Mac, NVIDIA on Linux), use `MESH_MODEL_MAP` to remap model names before forwarding:
 
 ```sh
 MESH_MODEL_MAP="gemma4:31b-mlx->gemma4:31b,qwen3.6:35b-mlx->qwen3.6:35b"
 ```
 
-Requests for `gemma4:31b-mlx` will be automatically remapped to `gemma4:31b` when forwarding to NVIDIA peers.
+## OpenAI-Compatible API
 
-## API Reference
+Point any OpenAI-compatible client (Hermes, OpenCode, Codex, LangChain, etc.) at `http://localhost:8081/v1`.
 
-### Health & Status
+### `POST /v1/chat/completions`
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/status` | GET | Server status, queue, mesh, hardware |
-| `/v1/health` | GET | OpenAI-compatible health check |
-| `/metrics` | GET | Prometheus metrics |
-
-### Authentication
-
-All endpoints (except dashboard, health, peer intros) require API key:
-
-```sh
-# Bearer token
-curl -H "Authorization: Bearer your-api-key" http://localhost:8081/api/status
-
-# Query parameter
-curl "http://localhost:8081/api/status?api_key=your-api-key"
-```
-
-Dashboard (`/`), health (`/v1/health`), and peer endpoints are exempt from auth.
-
-### Rate Limiting
-
-Default: 100 requests per minute per IP. Returns `429 Too Many Requests` when exceeded.
-
-```json
-{"error": "rate limit exceeded"}
-```
-
-### Job Queue
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/jobs` | POST | Submit job |
-| `/api/jobs` | GET | List recent jobs |
-| `/api/jobs/{job_id}` | GET | Get job status |
-| `/api/jobs/stream` | GET | SSE job streaming |
-| `/api/queue` | GET | Queue status |
-
-#### Submit Job
-
-```json
-{
-  "client_id": "my-app",
-  "job_type": "generate",
-  "payload": {
-    "prompt": "Hello, world!",
-    "model": "llama3.1:8b",
-    "stream": false
-  }
-}
-```
-
-#### Job Types
-
-| Type | Priority | Payload |
-|------|----------|---------|
-| `coding_agent_chat` | High | `messages`, `model`, `session_id` |
-| `chat` | High | `messages`, `model`, `stream` |
-| `generate` | Normal | `prompt`, `model`, `system`, `temperature` |
-| `embed` / `get_embedding` | Normal | `prompt`, `text`, `model` |
-| `list_models` | Low | — |
-| `pull_model` | Low | `name` |
-| Custom types | Low | Any Ollama API fields |
-
-#### SSE Job Streaming
-
-```sh
-curl -N "http://localhost:8081/api/jobs/stream?job_id=xxx"
-
-# Events:
-data: {"job_id":"xxx","status":"running","progress":0.5}
-data: {"job_id":"xxx","status":"completed","result":{...}}
-data: {"job_id":"xxx","status":"failed","error":"timeout"}
-```
-
-### Client Management
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/clients/register` | POST | Register client |
-| `/api/clients/{id}/heartbeat` | POST | Keep-alive |
-| `/api/clients/unregister` | POST | Deregister |
-| `/api/clients` | GET | List clients |
-
-### OpenAI-Compatible API
-
-Point any OpenAI client (Hermes, OpenCode, Codex, LangChain) at `http://localhost:8081/v1`.
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | Chat completion (streaming + non-streaming) |
-| `/v1/models` | GET | List models (local + peers) |
-
-#### Chat Completion
+Supports streaming (SSE) and non-streaming. Automatically forwards to mesh peers when the requested model isn't available locally.
 
 ```sh
 # Streaming
 curl -N -X POST http://localhost:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3.6:35b",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "stream": true
-  }'
+  -d '{"model":"qwen3.6:35b","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 
 # Non-streaming
 curl -X POST http://localhost:8081/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "llama3.1:8b",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
+  -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-**Auto-forwarding**: If the model isn't found locally, the request is automatically forwarded to the peer that has it.
+**Auto-forwarding**: If `model` is not found on local Ollama, the server finds the mesh peer that has it and streams the response from there. No client-side logic needed.
 
-#### List Models
+### `GET /v1/models`
 
-Returns models from local Ollama + all mesh peers:
+Returns models from local Ollama + all mesh peers. Hermes `model --refresh` uses this.
 
 ```json
 {
   "object": "list",
   "data": [
     {"id": "llama3.1:8b", "object": "model", "owned_by": "local"},
-    {"id": "qwen3.6:35b", "object": "model", "owned_by": "hive-axiom"}
+    {"id": "qwen3.6:35b", "object": "model", "owned_by": "hive-axiom"},
+    {"id": "gemma4:31b", "object": "model", "owned_by": "hive-axiom"}
   ]
 }
 ```
 
-### Coding Agent API
-
-Session-based interface for coding agents with context management and audit logging.
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/agent/sessions` | POST | Create session |
-| `/api/agent/sessions` | GET | List sessions |
-| `/api/agent/sessions/{id}` | GET | Get session |
-| `/api/agent/sessions/{id}` | DELETE | Delete session |
-| `/api/agent/sessions/{id}/messages` | POST | Send message |
-| `/api/agent/sessions/{id}/messages` | GET | List messages |
-| `/api/agent/sessions/{id}/context` | GET | Context stats |
-| `/api/agent/audit` | GET | Search audit logs |
-| `/api/agent/models` | GET | Models with context windows |
-
-#### Create Session
+### `GET /v1/health`
 
 ```json
-{
-  "agent_type": "hermes",
-  "model": "glm-4.7-flash:bf16",
-  "system_prompt": "You are a coding assistant.",
-  "token_budget": 160000
-}
+{"status": "ok", "server": "hive-server-go", "version": "1.7.0"}
 ```
 
-#### Send Message
+## Coding Agent API
 
-```json
-{
-  "role": "user",
-  "content": "Write a hello world in Go"
-}
+Session-based interface for coding agents with context management, automatic compression, and audit logging.
+
+### Quick Start
+
+```sh
+# Create session
+curl -s -X POST http://localhost:8081/api/agent/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"agent_type":"hermes","model":"glm-4.7-flash:bf16","system_prompt":"You are a coding assistant.","token_budget":160000}'
+
+# Send message
+curl -s -X POST http://localhost:8081/api/agent/sessions/{session_id}/messages \
+  -H "Content-Type: application/json" \
+  -d '{"role":"user","content":"Write a hello world in Go"}'
 ```
 
-### Model Management
+### Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/models/pull-proxy` | POST | Pull model from peer |
-| `/api/ollama/health` | GET | Ollama health + models |
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/agent/sessions` | Create session (auto-detects token budget from model) |
+| `GET` | `/api/agent/sessions` | List sessions |
+| `GET` | `/api/agent/sessions/{id}` | Get session details |
+| `DELETE` | `/api/agent/sessions/{id}` | Delete session |
+| `POST` | `/api/agent/sessions/{id}/messages` | Send message (triggers inference) |
+| `GET` | `/api/agent/sessions/{id}/messages` | List messages |
+| `GET` | `/api/agent/sessions/{id}/context` | Context stats (tokens, compression, model context window) |
+| `GET` | `/api/agent/audit` | Search audit logs |
+| `GET` | `/api/agent/models` | Available models with detected context windows |
 
-#### Pull from Peer
+### Context Compression
 
-```json
-{
-  "model": "qwen3.6:35b",
-  "peer_id": "hive-axiom"
-}
+When token usage exceeds 85% of the budget, older messages are automatically compressed into a summary. The system uses a 3-layer model context detection:
+
+1. **Ollama API** — Queries `/api/show` for actual context window
+2. **Hardcoded Registry** — 150+ known models (GLM-4: 200K, Llama 3: 128K, etc.)
+3. **Pattern Matching** — Heuristic detection by model name patterns
+
+### Hermes Configuration
+
+```yaml
+# ~/.hermes/config.yaml
+model:
+  name: glm-4.7-flash:bf16
+  base_url: http://localhost:8081/v1
+providers:
+  ollama-launch:
+    type: ollama
+    name: Hive Server
+    api: localhost:8081/v1
 ```
 
-### Mesh Networking
+## API Reference
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/peers` | GET | List peers |
-| `/api/peers/register` | POST | Register peer |
-| `/api/peers/introduce` | POST | Peer self-registration |
-| `/api/peers/scan` | GET | Re-probe seed peers |
-| `/api/peers/diagnostics` | GET | Mesh config + model map |
+### Status & Health
+
+**`GET /api/status`** — Server status, queue depth, hardware info, mesh peer count.
+
+**`GET /api/ollama/health`** — Ollama connectivity and available models.
+
+### Client Management
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/clients/register` | Register a client |
+| `POST` | `/api/clients/{client_id}/heartbeat` | Keep-alive |
+| `POST` | `/api/clients/unregister` | Deregister |
+| `GET` | `/api/clients` | List clients |
+
+### Job Queue
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/jobs` | Submit inference job |
+| `GET` | `/api/jobs` | List recent jobs |
+| `GET` | `/api/jobs/{job_id}` | Poll job result |
+| `POST` | `/api/jobs/forward` | Receive forwarded job from peer |
+| `GET` | `/api/queue` | Queue status |
+
+#### Job Types
+
+| Type | Payload |
+|---|---|
+| `generate` | `prompt`, `model`, `system`, `temperature`, `stream` |
+| `chat` | `messages`, `model`, `stream` |
+| `embed` / `get_embedding` | `prompt`, `text`, `model` |
+| `list_models` | — |
+| `pull_model` | `name` |
+| `coding_agent_chat` | `messages`, `model`, `session_id` |
+
+### Resources
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/nodes` | All nodes with providers and models |
+| `GET` | `/api/providers` | Available provider types |
+| `GET` | `/api/models` | Aggregated models (deduplicated) |
+
+### Usage Reports
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/reports/usage` | Aggregated token usage |
+| `GET` | `/api/reports/usage/recent` | Recent 100 records |
+| `GET` | `/api/reports/usage/timeseries` | TPS time-series |
+| `GET` | `/api/reports/usage/histogram` | TPS distribution |
+
+### Mesh
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/peers` | Discovered peers with load |
+| `POST` | `/api/peers/register` | Manually register peer |
+| `POST` | `/api/peers/introduce` | Remote peer self-registration |
+| `POST` | `/api/peers/scan` | Re-probe seed peers |
+| `GET` | `/api/peers/diagnostics` | Mesh config + model map |
 
 ### Observability
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/logs` | GET | Server logs (poll by timestamp) |
-| `/api/logs/clear` | POST | Clear log buffer |
-| `/api/reports/usage` | GET | Aggregated token usage |
-| `/api/reports/usage/recent` | GET | Recent 100 records |
-| `/api/reports/usage/timeseries` | GET | TPS time-series |
-| `/api/reports/usage/histogram` | GET | TPS distribution |
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/logs` | Server logs (poll by timestamp) |
+| `POST` | `/api/logs/clear` | Clear log buffer |
 
 ### Dashboard
 
-**`GET /`** — Live dashboard with stats, queue, mesh topology, token usage charts, live logs, and **Audit Trail** tab.
-
-### Audit Trail
-
-Every request to the server is captured with full request/response lifecycle, prompt, model, and timing data. The audit trail is stored in SQLite and viewable via API or the dashboard's **Audit Trail** tab.
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/audit/recent` | GET | Recent audit events (with category filter) |
-| `/api/audit/search` | GET | Full-text search across prompts, models, paths |
-| `/api/audit/timeline/{request_id}` | GET | Event timeline for a specific request |
-| `/api/audit/summary/{request_id}` | GET | Summary with duration & event counts |
-| `/api/audit/detail/{request_id}` | GET | Full detail: request body, response, timeline |
-
-#### Recent Events
-
-```sh
-curl "http://localhost:8081/api/audit/recent?limit=20&category=coding_agent"
-```
-
-```json
-{
-  "events": [
-    {
-      "id": 2886,
-      "request_id": "req_1784220418094_00808808",
-      "event_type": "request",
-      "category": "openai_compat",
-      "method": "POST",
-      "path": "/v1/chat/completions",
-      "model": "gemma4:31b-mlx",
-      "prompt": "[System: The active model...]",
-      "overrides": {"model": "gemma4:31b-mlx", "messages": [...]},
-      "created_at": "2026-07-16T18:46:58+02:00"
-    }
-  ],
-  "count": 1
-}
-```
-
-#### Request Detail (Overlay)
-
-```sh
-curl "http://localhost:8081/api/audit/detail/req_xxx"
-```
-
-```json
-{
-  "request_id": "req_xxx",
-  "method": "POST",
-  "path": "/v1/chat/completions",
-  "model": "llama3.1:8b",
-  "prompt": "Say hi in 3 words",
-  "status_code": 200,
-  "token_count": 25,
-  "total_duration_ms": 5000,
-  "total_events": 2,
-  "response_content": "Hello!",
-  "events": [
-    {
-      "event_type": "request",
-      "model": "llama3.1:8b",
-      "prompt": "Say hi in 3 words",
-      "method": "POST",
-      "path": "/v1/chat/completions",
-      "created_at": "..."
-    },
-    {
-      "event_type": "response",
-      "content": "Hello!",
-      "status_code": 200,
-      "duration_ms": 5000
-    }
-  ]
-}
-```
-
-#### Search
-
-```sh
-curl "http://localhost:8081/api/audit/search?q=gemma4&limit=10"
-```
-
-Searches across: `prompt`, `model`, `path`, `method`, `content`, `query`, `job_type`, `error_message`.
-
-#### Dashboard Timeline View
-
-The **Audit Trail** tab on the dashboard:
-- Groups events by `request_id`, sorted with important requests first (chat completions, errors)
-- Shows method badge, path, model, prompt preview, duration
-- Click the request body area → opens **detail overlay** with full request JSON, response content, and expandable event timeline
-- Active streaming requests highlighted with pulsing purple border
-- Inline toggle (▶/▼) shows brief event summary without opening the overlay
-- Category filter: Coding Agent, OpenAI Compat, Job Queue, Mesh, System
-- Free-text search filters in real-time
-
-#### Captured Data
-
-| Field | Description |
-|-------|-------------|
-| `request_id` | Unique per-request identifier (`req_{timestamp}_{hex}`) |
-| `prompt` | Extracted from body `prompt`, `messages[last].content`, or nested `payload` |
-| `model` | Model name from the request body |
-| `overrides` | Full original request body (all parameters) |
-| `event_type` | `request`, `response`, `error`, `forward`, `cache_hit`, `job_complete`, `job_error` |
-| `category` | `coding_agent`, `openai_compat`, `job_queue`, `mesh`, `system` |
-| `duration_ms` | Request-response duration in milliseconds |
-| `token_count` | Total tokens used (from completion response) |
-| `status_code` | HTTP status code of the response |
-
-#### Data Persistence
-
-Audit trail data is stored in the SQLite database at `./hive-server.db` (configurable via `HIVE_DB_PATH`). Data persists across server restarts. The database can be backed up, copied, or inspected with any SQLite tool:
-
-```sh
-sqlite3 hive-server.db "SELECT COUNT(*) FROM request_audit_trail"
-sqlite3 hive-server.db "SELECT event_type, path, model, datetime(created_at, 'unixepoch')
-  FROM request_audit_trail ORDER BY created_at DESC LIMIT 10"
-```
-
-High-frequency dashboard polling endpoints (`/api/logs`, `/api/clients`, `/api/status`, `/api/reports/*`, `/api/ollama/health`) are excluded from audit logging to avoid noise.
+**`GET /`** — Live dashboard with stats, queue, mesh, token usage charts, live logs.
 
 ## Mesh Discovery
 
-### How It Works
-
-1. **UDP Beacon Broadcast** — Every 10s on `MESH_DISCOVERY_PORT` (default 8082)
-2. **Beacon Contents** — `server_id`, `announce_addr`, `port`, `models`, `max_concurrent`, `available_capacity`, `pending_jobs`, `running_jobs`
-3. **Peer Staleness** — Peers removed after 30s without beacon
-4. **Active Health Polling** — 10s interval HTTP health checks (faster than beacon timeout)
-5. **Seed Peers** — Probed via HTTP `/api/status` every 30s
-6. **Bi-directional Introduction** — Peers exchange state via `POST /api/peers/introduce`
-
-### Job Forwarding
-
-When local capacity is exhausted:
-1. Server selects least-loaded peer
-2. Forwards job via `POST /api/jobs/forward`
-3. Peer executes and returns result
-
-### Model Auto-Forwarding
-
-When a model isn't found locally:
-1. Server queries peer model cache (30s TTL)
-2. Finds peer with the model
-3. Streams response from peer (transparent to client)
+- UDP beacon broadcast every 10s on `MESH_DISCOVERY_PORT` (default 8082)
+- Beacons include: `server_id`, `announce_addr`, `port`, `max_concurrent`, `available_capacity`, `pending_jobs`, `running_jobs`
+- Peers stale after 30s of no beacon
+- Seed peers probed via HTTP `/api/status` every 30s
+- Bi-directional introduction via `POST /api/peers/introduce`
+- Job forwarding: when local capacity exhausted, forwards to least-loaded peer
+- Cross-platform model mapping: `MESH_MODEL_MAP` remaps model names (e.g. MLX→NVIDIA) before forwarding
 
 ### Docker Networking
 
-In Docker, set `MESH_ANNOUNCE_ADDRESS` to your host's LAN IP:
+In Docker, set `MESH_ANNOUNCE_ADDRESS` to your host's LAN IP so peers can reach this container:
 
 ```sh
 MESH_ANNOUNCE_ADDRESS="192.168.1.50:8081"
 ```
 
 Without this, beacons announce the Docker internal IP which is unreachable from other machines.
-
-## Response Cache
-
-When enabled, identical prompts return cached responses:
-
-```sh
-# Enable cache
-HIVE_CACHE_ENABLED=true HIVE_CACHE_TTL_SECONDS=600 ./hive-server-go
-
-# Or via YAML
-cache:
-  enabled: true
-  max_entries: 2000
-  ttl_seconds: 600
-```
-
-Cache uses SHA256 prompt-hash keys with configurable TTL (default 5 minutes).
-
-## Metrics
-
-Prometheus-compatible metrics at `GET /metrics`:
-
-```
-# HELP hive_uptime_seconds Server uptime
-# TYPE hive_uptime_seconds gauge
-hive_uptime_seconds 12345.67
-
-# HELP hive_jobs_total Total jobs submitted
-# TYPE hive_jobs_total counter
-hive_jobs_total 1234
-
-# HELP hive_queue_depth Current queue depth
-# TYPE hive_queue_depth gauge
-hive_queue_depth 2
-
-# HELP hive_tokens_per_second Tokens per second
-# TYPE hive_tokens_per_second summary
-hive_tokens_per_second_sum 123456.78
-hive_tokens_per_second_count 567
-```
-
-### Metrics Available
-
-- `hive_uptime_seconds` — Server uptime
-- `hive_jobs_total` — Jobs submitted
-- `hive_jobs_completed_total` — Jobs completed
-- `hive_jobs_failed_total` — Jobs failed
-- `hive_messages_cached_total` — Cache hits
-- `hive_peers_forwarded_total` — Jobs forwarded to peers
-- `hive_queue_depth` — Current queue depth
-- `hive_running_jobs` — Currently running jobs
-- `hive_connected_peers` — Connected peers
-- `hive_active_clients` — Active clients
-- `hive_job_duration_seconds` — Job execution duration
-- `hive_tokens_per_second` — Tokens per second
 
 ## Architecture
 
@@ -577,36 +301,25 @@ hive_tokens_per_second_count 567
 │  ┌───────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
 │  │ Job Queue  │  │   Mesh   │  │ Provider │  │  Coding    │  │
 │  │ (workers)  │  │ Discovery│  │ Manager  │  │  Agent API │  │
-│  │ Priority   │  │ UDP bcast│  │ auto-    │  │  Sessions  │  │
-│  │ Queues     │  │ health   │  │ detect   │  │  Context   │  │
+│  │ Ollama     │  │ UDP bcast│  │ auto-    │  │  Sessions  │  │
+│  │ calls      │  │ seed p/r │  │ detect   │  │  Context   │  │
 │  └─────┬─────┘  └──────────┘  └──────────┘  └──────┬─────┘  │
 │        │                                             │        │
 │  ┌─────▼─────────────────────────────────────────────▼─────┐  │
 │  │              OpenAI-Compatible API (:8081)              │  │
 │  │  /v1/chat/completions  /v1/models  /v1/health          │  │
 │  │  /api/jobs  /api/clients  /api/peers  /api/agent/*     │  │
-│  │  /metrics  /api/jobs/stream                            │  │
-│  └────────────────────────────┬────────────────────────────┘  │
-│                               │                               │
-│  ┌────────────────────────────▼────────────────────────────┐  │
-│  │  Auth Middleware  →  Rate Limiter  →  Request Logger    │  │
 │  └────────────────────────────┬────────────────────────────┘  │
 │                               │                               │
 │  ┌────────────────────────────▼────────────────────────────┐  │
 │  │  Local Ollama (:11434)  ←→  Mesh Peers (:8081)        │  │
 │  │  Auto-forward on 404     Model mapping (MLX↔NVIDIA)    │  │
-│  │  Response Cache          Priority Job Dispatch          │  │
 │  └────────────────────────────────────────────────────────┘  │
 │                                                               │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │  SQLite WAL — token_usage, coding_agent_sessions,      │  │
-│  │              coding_agent_messages, coding_agent_audit  │  │
+│  │  SQLite — token_usage, coding_agent_sessions,          │  │
+│  │          coding_agent_messages, coding_agent_audit     │  │
 │  │  /data/hive-server.db                                  │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                               │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │  Observability — Prometheus /metrics, JSON logging,    │  │
-│  │                  SSE job streaming, Live dashboard      │  │
 │  └────────────────────────────────────────────────────────┘  │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -618,26 +331,12 @@ hive_tokens_per_second_count 567
 - **Token Usage** — stats + TPS chart (Line/Hist modes, time range buttons, per-model reports)
 - **Mesh Topology** — peer status, load, model map
 
-## Development
-
-### Building
+## Building
 
 ```sh
 go build ./hive-server-go/
 go vet ./hive-server-go/
 ```
-
-### Testing
-
-```sh
-# Run all tests
-go test ./hive-server-go/...
-
-# Build Docker image
-docker build -t hive-server-go -f hive-server-go/Dockerfile .
-```
-
-### Adding Features
 
 The embedded dashboard at `static/index.html` is compiled into the binary via `//go:embed`.
 

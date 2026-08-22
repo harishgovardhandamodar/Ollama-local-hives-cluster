@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"reflect"
 	"regexp"
 	"sync"
 	"time"
@@ -18,15 +17,6 @@ const (
 	JobRunning   JobStatus = "running"
 	JobCompleted JobStatus = "completed"
 	JobFailed    JobStatus = "failed"
-)
-
-type JobPriority int
-
-const (
-	PriorityLow    JobPriority = 0
-	PriorityNormal JobPriority = 1
-	PriorityHigh   JobPriority = 2
-	PriorityMax    JobPriority = 3
 )
 
 type Job struct {
@@ -47,21 +37,15 @@ type Job struct {
 	EvalTokens    int                    `json:"completion_tokens,omitempty"`
 	TotalTokens   int                    `json:"total_tokens,omitempty"`
 	EvalDuration  float64                `json:"-"`
-	Priority      JobPriority            `json:"priority"`
+	
+	// Priority queue fields
+	Priority      JobPriority            `json:"priority,omitempty"`
+	Deadline      time.Time              `json:"deadline,omitempty"`
+	RetryCount    int                    `json:"retry_count,omitempty"`
+	MaxRetries    int                    `json:"max_retries,omitempty"`
 }
 
 func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
-	// Assign priority based on job type
-	var priority JobPriority
-	switch jobType {
-	case "coding_agent_chat", "chat":
-		priority = PriorityHigh
-	case "generate", "embed", "get_embedding":
-		priority = PriorityNormal
-	default:
-		priority = PriorityLow
-	}
-
 	return &Job{
 		ID:         id,
 		ClientID:   clientID,
@@ -69,7 +53,6 @@ func NewJob(id, clientID, jobType string, payload map[string]interface{}) *Job {
 		PayloadMap: payload,
 		Status:     JobPending,
 		CreatedAt:  now(),
-		Priority:   priority,
 	}
 }
 
@@ -87,18 +70,14 @@ type OllamaQueue struct {
 	completed     map[string]*Job
 	maxConcurrent int
 	ollamaURL     string
-	stopped       bool
 	ollamaModel   string
-
-	// Priority queues
-	priorityQueues [4]chan *Job // indexed by JobPriority
 
 	httpClient    *http.Client
 	httpClientMu  sync.Mutex
 }
 
 func NewOllamaQueue(maxConcurrent int, ollamaURL, ollamaModel string) *OllamaQueue {
-	q := &OllamaQueue{
+	return &OllamaQueue{
 		jobCh:         make(chan *Job, 1000),
 		stopCh:        make(chan struct{}),
 		running:       make(map[string]*Job),
@@ -115,14 +94,6 @@ func NewOllamaQueue(maxConcurrent int, ollamaURL, ollamaModel string) *OllamaQue
 			},
 		},
 	}
-
-	// Initialize priority queues with different capacities
-	q.priorityQueues[PriorityLow] = make(chan *Job, 200)
-	q.priorityQueues[PriorityNormal] = make(chan *Job, 500)
-	q.priorityQueues[PriorityHigh] = make(chan *Job, 200)
-	q.priorityQueues[PriorityMax] = make(chan *Job, 100)
-
-	return q
 }
 
 func (q *OllamaQueue) Start() {
@@ -133,28 +104,11 @@ func (q *OllamaQueue) Start() {
 }
 
 func (q *OllamaQueue) Stop() {
-	q.mu.Lock()
-	if q.stopped {
-		q.mu.Unlock()
-		return
-	}
-	q.stopped = true
-	q.mu.Unlock()
 	close(q.stopCh)
 	q.wg.Wait()
 }
 
 func (q *OllamaQueue) Submit(job *Job) bool {
-	// Use priority queue if available
-	if int(job.Priority) < len(q.priorityQueues) {
-		select {
-		case q.priorityQueues[job.Priority] <- job:
-			return true
-		default:
-			// Priority queue full, try main queue
-		}
-	}
-
 	select {
 	case q.jobCh <- job:
 		return true
@@ -166,98 +120,26 @@ func (q *OllamaQueue) Submit(job *Job) bool {
 func (q *OllamaQueue) worker(id int) {
 	defer q.wg.Done()
 	for {
-		// Build select cases dynamically for priority channels + main channel + stop
-		job := q.receiveJob()
-		if job == nil {
-			return // stopCh closed
-		}
+		select {
+		case <-q.stopCh:
+			return
+		case job := <-q.jobCh:
+			job.Status = JobRunning
+			now := now()
+			job.StartedAt = &now
 
-		job.Status = JobRunning
-		t := now()
-		job.StartedAt = &t
+			q.mu.Lock()
+			q.running[job.ID] = job
+			q.mu.Unlock()
 
-		q.mu.Lock()
-		q.running[job.ID] = job
-		q.mu.Unlock()
+			q.executeJob(job)
 
-		q.executeJob(job)
-
-		q.mu.Lock()
-		delete(q.running, job.ID)
-		q.completed[job.ID] = job
-		q.mu.Unlock()
-
-		NotifyJobUpdate(job)
-
-		// Log audit trail event for job completion
-		if globalAuditManager != nil {
-			eventType := "job_complete"
-			if job.Status == JobFailed {
-				eventType = "job_error"
-			}
-			globalAuditManager.LogJobEvent("", job.ID, job.JobType, job.Model, eventType, map[string]interface{}{
-				"status":         string(job.Status),
-				"total_tokens":   job.TotalTokens,
-				"prompt_tokens":  job.PromptTokens,
-				"eval_tokens":    job.EvalTokens,
-				"eval_duration":  job.EvalDuration,
-				"client_id":      job.ClientID,
-			})
-		}
-
-		if job.StartedAt != nil && job.CompletedAt != nil {
-			duration := *job.CompletedAt - *job.StartedAt
-			globalMetrics.RecordJobDuration(duration)
-		}
-		globalMetrics.RecordTokenCount(job.TotalTokens)
-		if job.TotalTokens > 0 && job.StartedAt != nil && job.CompletedAt != nil {
-			duration := *job.CompletedAt - *job.StartedAt
-			if duration > 0 {
-				globalMetrics.RecordTPS(float64(job.TotalTokens) / duration)
-			}
-		}
-		if job.Status == JobCompleted {
-			globalMetrics.IncrJobsCompleted()
-		} else {
-			globalMetrics.IncrJobsFailed()
+			q.mu.Lock()
+			delete(q.running, job.ID)
+			q.completed[job.ID] = job
+			q.mu.Unlock()
 		}
 	}
-}
-
-// receiveJob blocks until a job is available from any priority queue or the main queue.
-// Returns nil if stopCh is closed.
-func (q *OllamaQueue) receiveJob() *Job {
-	// Use reflect.Select for dynamic channel selection
-	cases := make([]reflect.SelectCase, 0, len(q.priorityQueues)+2)
-
-	// Stop channel (index 0)
-	cases = append(cases, reflect.SelectCase{
-		Dir:  reflect.SelectRecv,
-		Chan: reflect.ValueOf(q.stopCh),
-	})
-
-	// Main queue (index 1)
-	cases = append(cases, reflect.SelectCase{
-		Dir:  reflect.SelectRecv,
-		Chan: reflect.ValueOf(q.jobCh),
-	})
-
-	// Priority queues (indices 2..N)
-	for i := PriorityMax; i >= PriorityLow; i-- {
-		cases = append(cases, reflect.SelectCase{
-			Dir:  reflect.SelectRecv,
-			Chan: reflect.ValueOf(q.priorityQueues[i]),
-		})
-	}
-
-	chosen, value, _ := reflect.Select(cases)
-	if chosen == 0 {
-		return nil // stopCh
-	}
-	if value.IsValid() && !value.IsNil() {
-		return value.Interface().(*Job)
-	}
-	return nil
 }
 
 var resultPool = sync.Pool{
@@ -588,7 +470,7 @@ func (q *OllamaQueue) GetQueueStatus() map[string]interface{} {
 func (q *OllamaQueue) GetAvailableCapacity() int {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return max(0, q.maxConcurrent-len(q.running))
+	return maxInt(0, q.maxConcurrent-len(q.running))
 }
 
 func (q *OllamaQueue) GetJob(jobID string) *Job {

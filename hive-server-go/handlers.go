@@ -2,30 +2,34 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 var (
-	serverVersion    = "1.9.2"
-	startTime        = time.Now()
-	globalQueue      *OllamaQueue // global reference for streaming
-	globalAuditManager *AuditTrailManager // global audit trail manager
+	serverVersion = "1.7.0"
+	startTime     = time.Now()
 )
 
 type HiveServer struct {
-	queue        *OllamaQueue
-	mesh         *MeshDiscovery
-	clients      *ClientManager
-	cfg          ServerConfig
-	provider     *ProviderManager
-	codingAgent  *CodingAgentManager
+	queue          *PriorityQueue
+	mesh           *MeshDiscovery
+	clients        *ClientManager
+	cfg            ServerConfig
+	providerMgr    *ProviderManager
+	codingAgent    *CodingAgentManager
+	modelRegistry  *ModelRegistry
+	cache          *ResponseCache
+	circuitBreaker *CircuitBreakerManager
+	metrics        *MetricsManager
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 type ClientManager struct {
@@ -51,7 +55,6 @@ type ServerConfig struct {
 	MeshEnabled        bool
 	MaxClients         int
 	CustomProviderURLs []string
-	Cache              *ResponseCache
 }
 
 func NewClientManager(maxClients int) *ClientManager {
@@ -135,8 +138,12 @@ func (cm *ClientManager) IncrementCompleted(clientID string) {
 }
 
 func NewHiveServer(cfg ServerConfig) *HiveServer {
-	queue := NewOllamaQueue(cfg.MaxConcurrent, cfg.OllamaURL, cfg.OllamaModel)
-	globalQueue = queue // Set global reference for streaming
+	// Initialize context for graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	
+	// Initialize priority queue with 4 tiers
+	queue := NewPriorityQueue()
+	
 	var mesh *MeshDiscovery
 	if cfg.MeshEnabled {
 		mesh = NewMeshDiscovery(
@@ -147,25 +154,80 @@ func NewHiveServer(cfg ServerConfig) *HiveServer {
 			cfg.OllamaModel,
 		)
 	}
-	provider := NewProviderManager(
+	
+	// Initialize model registry for tracking loaded models across the mesh
+	modelRegistry := NewModelRegistry()
+	
+	// Initialize response cache
+	cache, err := NewResponseCache(CacheConfig{
+		MaxEntries:   int64(getEnvInt("CACHE_MAX_ITEMS", 1000)),
+		TTLDuration:  time.Duration(getEnvInt("CACHE_TTL_SECONDS", 300)) * time.Second,
+		EnableSemantic: true,
+	})
+	if err != nil {
+		logError("Failed to initialize cache: %v", err)
+		cache = NewResponseCacheNoop()
+	}
+	
+	// Initialize circuit breaker manager
+	circuitBreaker := NewCircuitBreakerManager()
+	// Configure circuit breakers via environment
+	circuitBreaker.SetConfig(CircuitBreakerConfig{
+		FailureThreshold: getEnvInt("CB_FAILURE_THRESHOLD", 5),
+		Timeout:          time.Duration(getEnvInt("CB_TIMEOUT_SECONDS", 30)) * time.Second,
+	})
+	
+	// Initialize metrics manager
+	metrics := NewMetricsManager()
+	
+	// Initialize provider manager with model registry
+	providerMgr := NewProviderManager(
 		getServerID(),
 		cfg.ServerPort,
 		cfg.OllamaURL,
 		cfg.CustomProviderURLs,
+		modelRegistry,
 	)
+	
+	// Set circuit breaker and metrics on provider manager (if available)
+	if providerMgr != nil {
+		providerMgr.SetCircuitBreaker(circuitBreaker)
+		providerMgr.SetMetrics(metrics)
+	}
+	
+	// Set up mesh callbacks for queue status and model info
+	if mesh != nil {
+		mesh.SetCallbacks(
+			func() QueueStatus {
+				return queue.GetStats()
+			},
+			func() int {
+				return cfg.MaxConcurrent - int(queue.GetActiveCount())
+			},
+			func() []LoadedModelInfo {
+				return modelRegistry.GetAllLocalModels()
+			},
+		)
+	}
 
 	var cam *CodingAgentManager
 	if defaultDB != nil {
-		cam = NewCodingAgentManager(defaultDB, queue, mesh, getServerID())
+		cam = NewCodingAgentManager(defaultDB, nil, mesh, getServerID()) // TODO: Update coding agent to use priority queue
 	}
 
 	return &HiveServer{
-		queue:       queue,
-		mesh:        mesh,
-		clients:     NewClientManager(cfg.MaxClients),
-		cfg:         cfg,
-		provider:    provider,
-		codingAgent: cam,
+		queue:          queue,
+		mesh:           mesh,
+		clients:        NewClientManager(cfg.MaxClients),
+		cfg:            cfg,
+		providerMgr:    providerMgr,
+		codingAgent:    cam,
+		modelRegistry:  modelRegistry,
+		cache:          cache,
+		circuitBreaker: circuitBreaker,
+		metrics:        metrics,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 
@@ -254,9 +316,6 @@ func (hs *HiveServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/chat/completions", hs.handleOpenAIChatCompletions)
 	mux.HandleFunc("GET /v1/models", hs.handleOpenAIListModels)
 	mux.HandleFunc("GET /v1/health", hs.handleOpenAIHealth)
-
-	// Model pull proxy (pull from peers)
-	mux.HandleFunc("POST /api/models/pull-proxy", hs.handleModelPullProxy)
 }
 
 func (hs *HiveServer) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +380,7 @@ func (hs *HiveServer) handleClientRegister(w http.ResponseWriter, r *http.Reques
 }
 
 func (hs *HiveServer) handleClientHeartbeatPath(w http.ResponseWriter, r *http.Request) {
-	clientID := r.PathValue("client_id")
+	clientID := r.URL.Query().Get("client_id")
 	if clientID == "" {
 		var body struct {
 			ClientID string `json:"client_id"`
@@ -386,30 +445,6 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check cache for identical requests
-	if hs.cfg.Cache != nil && body.JobType == "chat" {
-		if msgs, ok := body.Payload["messages"].([]interface{}); ok && len(msgs) > 0 {
-			var strMsgs []map[string]string
-			for _, m := range msgs {
-				if msgMap, ok := m.(map[string]interface{}); ok {
-					strMsgs = append(strMsgs, map[string]string{
-						"role":    fmt.Sprintf("%v", msgMap["role"]),
-						"content": fmt.Sprintf("%v", msgMap["content"]),
-					})
-				}
-			}
-			if len(strMsgs) > 0 {
-				model := fmt.Sprintf("%v", body.Payload["model"])
-				cacheKey := hs.cfg.Cache.GenerateKey(model, strMsgs)
-				if cached, found := hs.cfg.Cache.Get(cacheKey); found {
-					globalMetrics.IncrMessagesCached()
-					writeJSON(w, cached)
-					return
-				}
-			}
-		}
-	}
-
 	if hs.cfg.MeshEnabled && hs.mesh != nil {
 		capacity := hs.queue.GetAvailableCapacity()
 		if capacity <= 0 {
@@ -417,11 +452,9 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 			if peer != nil {
 				jobID := fmt.Sprintf("%s:%s:%d", body.ClientID, body.JobType, time.Now().UnixMilli())
 				logInfo("Local queue full, forwarding job %s to peer %s", jobID, peer.ServerID)
-				globalMetrics.IncrPeersForwarded()
 				forwarded := forwardJobToPeer(peer, jobID, body.ClientID, body.JobType, body.Payload)
 				if forwarded != nil {
 					client.JobsSubmitted++
-					globalMetrics.IncrJobsSubmitted()
 					writeJSON(w, forwarded)
 					return
 				}
@@ -434,13 +467,12 @@ func (hs *HiveServer) submitJob(w http.ResponseWriter, r *http.Request) {
 	job := NewJob(jobID, body.ClientID, body.JobType, body.Payload)
 	hs.queue.Submit(job)
 	client.JobsSubmitted++
-	globalMetrics.IncrJobsSubmitted()
 	logInfo("Job submitted: %s (type=%s, client=%s)", jobID, body.JobType, body.ClientID)
 	writeJSON(w, job)
 }
 
 func (hs *HiveServer) handleJobGet(w http.ResponseWriter, r *http.Request) {
-	jobID := r.PathValue("job_id")
+	jobID := r.URL.Query().Get("job_id")
 	job := hs.queue.GetJob(jobID)
 	if job == nil {
 		http.Error(w, `{"error":"job not found"}`, http.StatusNotFound)
@@ -900,7 +932,7 @@ func (hs *HiveServer) handleAgentSessionList(w http.ResponseWriter, r *http.Requ
 }
 
 func (hs *HiveServer) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -918,7 +950,7 @@ func (hs *HiveServer) handleAgentSessionGet(w http.ResponseWriter, r *http.Reque
 }
 
 func (hs *HiveServer) handleAgentSessionDelete(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -939,7 +971,7 @@ func (hs *HiveServer) handleAgentSessionArchive(w http.ResponseWriter, r *http.R
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -960,7 +992,7 @@ func (hs *HiveServer) handleAgentMessageSend(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -1004,7 +1036,7 @@ func (hs *HiveServer) handleAgentMessageSend(w http.ResponseWriter, r *http.Requ
 }
 
 func (hs *HiveServer) handleAgentMessagesGet(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -1030,7 +1062,7 @@ func (hs *HiveServer) handleAgentMessagesGet(w http.ResponseWriter, r *http.Requ
 }
 
 func (hs *HiveServer) handleAgentContextStats(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -1048,7 +1080,7 @@ func (hs *HiveServer) handleAgentContextStats(w http.ResponseWriter, r *http.Req
 }
 
 func (hs *HiveServer) handleAgentAuditLogs(w http.ResponseWriter, r *http.Request) {
-	sessionID := r.PathValue("session_id")
+	sessionID := r.URL.Query().Get("session_id")
 	if sessionID == "" {
 		http.Error(w, "session_id required", http.StatusBadRequest)
 		return
@@ -1141,218 +1173,4 @@ func (hs *HiveServer) handleAgentModels(w http.ResponseWriter, r *http.Request) 
 		"live_models": liveModels,
 		"registry":    registryModels,
 	})
-}
-
-// handleModelPullProxy pulls a model from a peer's Ollama instance
-func (hs *HiveServer) handleModelPullProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" {
-		http.Error(w, "POST required", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var body struct {
-		Model    string `json:"model"`
-		PeerID   string `json:"peer_id,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad json", http.StatusBadRequest)
-		return
-	}
-	if body.Model == "" {
-		http.Error(w, "model required", http.StatusBadRequest)
-		return
-	}
-
-	// Find peer with model or use specified peer
-	var peer *PeerInfo
-	if body.PeerID != "" && hs.mesh != nil {
-		peers := hs.mesh.GetAlivePeers()
-		for _, p := range peers {
-			if p.ServerID == body.PeerID {
-				peer = p
-				break
-			}
-		}
-	} else {
-		peer = hs.findPeerWithModel(body.Model)
-	}
-
-	if peer == nil {
-		http.Error(w, `{"error":"no peer found with model"}`, http.StatusNotFound)
-		return
-	}
-
-	// Forward pull request to peer
-	payload := map[string]interface{}{
-		"name": body.Model,
-	}
-	data, _ := json.Marshal(payload)
-
-	client := &http.Client{Timeout: 600 * time.Second}
-	resp, err := client.Post(peer.Endpoint+"/api/models/pull", "application/json", bytes.NewReader(data))
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	var result interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	writeJSON(w, map[string]interface{}{
-		"status":  "pulling",
-		"model":   body.Model,
-		"peer":    peer.ServerID,
-		"result":  result,
-	})
-}
-
-// Audit Trail API Handlers
-
-func handleAuditRecent(w http.ResponseWriter, r *http.Request) {
-	if globalAuditManager == nil {
-		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
-		return
-	}
-
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
-			limit = parsed
-		}
-	}
-
-	category := r.URL.Query().Get("category")
-
-	events, err := globalAuditManager.GetRecentEvents(limit, category)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, map[string]interface{}{
-		"events": events,
-		"count":  len(events),
-	})
-}
-
-func handleAuditSearch(w http.ResponseWriter, r *http.Request) {
-	if globalAuditManager == nil {
-		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
-		return
-	}
-
-	query := r.URL.Query().Get("q")
-	if query == "" {
-		http.Error(w, `{"error":"query parameter 'q' required"}`, http.StatusBadRequest)
-		return
-	}
-
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 && parsed <= 1000 {
-			limit = parsed
-		}
-	}
-
-	events, err := globalAuditManager.SearchEvents(query, limit)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, map[string]interface{}{
-		"events": events,
-		"count":  len(events),
-		"query":  query,
-	})
-}
-
-func handleAuditTimeline(w http.ResponseWriter, r *http.Request) {
-	if globalAuditManager == nil {
-		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
-		return
-	}
-
-	requestID := r.PathValue("request_id")
-	if requestID == "" {
-		http.Error(w, `{"error":"request_id required"}`, http.StatusBadRequest)
-		return
-	}
-
-	events, err := globalAuditManager.GetRequestTimeline(requestID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	if len(events) == 0 {
-		http.Error(w, `{"error":"no events found for request"}`, http.StatusNotFound)
-		return
-	}
-
-	// Calculate total duration
-	var totalDurationMs float64
-	if len(events) > 1 {
-		totalDurationMs = float64(events[len(events)-1].CreatedAt.Sub(events[0].CreatedAt).Milliseconds())
-	}
-
-	writeJSON(w, map[string]interface{}{
-		"request_id":      requestID,
-		"events":          events,
-		"total_events":    len(events),
-		"total_duration_ms": totalDurationMs,
-	})
-}
-
-func handleAuditSummary(w http.ResponseWriter, r *http.Request) {
-	if globalAuditManager == nil {
-		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
-		return
-	}
-
-	requestID := r.PathValue("request_id")
-	if requestID == "" {
-		http.Error(w, `{"error":"request_id required"}`, http.StatusBadRequest)
-		return
-	}
-
-	summary, err := globalAuditManager.GetRequestSummary(requestID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	if summary == nil {
-		http.Error(w, `{"error":"no events found for request"}`, http.StatusNotFound)
-		return
-	}
-
-	writeJSON(w, summary)
-}
-
-func handleAuditDetail(w http.ResponseWriter, r *http.Request) {
-	if globalAuditManager == nil {
-		http.Error(w, `{"error":"audit trail not enabled"}`, http.StatusInternalServerError)
-		return
-	}
-
-	requestID := r.PathValue("request_id")
-	if requestID == "" {
-		http.Error(w, `{"error":"request_id required"}`, http.StatusBadRequest)
-		return
-	}
-
-	detail, err := globalAuditManager.GetRequestDetail(requestID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	if detail == nil {
-		http.Error(w, `{"error":"no events found for request"}`, http.StatusNotFound)
-		return
-	}
-
-	writeJSON(w, detail)
 }

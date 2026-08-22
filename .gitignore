@@ -1,4 +1,22 @@
-.DS_Store
-*.db
-*.db-shm
-*.db-wal
+```
+# Compiled and binary files
+*.o
+*.obj
+*.out
+
+# Dependencies
+vendor/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Editors
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+.env.*
+```
